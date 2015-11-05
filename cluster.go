@@ -4,6 +4,7 @@ import (
     "fmt"
     "time"
     "sync"
+    "strings"
 )
 
 const (
@@ -44,14 +45,41 @@ func New(addrs []string,  timeout time.Duration,
     }
 
     for _, node := range cluster.nodes {
-	clusterInfo, err := String(node.do("CLUSTER", "NODES"))
+	nodesInfo, err := Bytes(node.do("CLUSTER", "NODES"))
 	if err != nil {
-	    fmt.Println(node.address, err)
 	    continue
 	}
-	fmt.Println(clusterInfo)
-	break
+	if err := cluster.parseNodesInfo(nodesInfo); err != nil {
+	    return cluster, nil
+	}
     }
 
-    return cluster, nil
+    return nil, fmt.Errorf("no invalid node in %v", addrs)
+}
+
+const (
+    FIELD_NAME = iota
+    FIELD_ADDR
+    FIELD_FLAG
+    FIELD_MASTER
+    FIELD_PING
+    FIELD_PONG
+    FIELD_EPOCH
+    FIELD_STATE
+    FIELD_SLOT
+    FIELD_EXTRA
+)
+
+func (cluster *redisCluster) parseNodesInfo(info []byte) error {
+    infos := strings.Split(info, "\n")
+    nodes := make([][]string, len(infos))
+
+    for i := range infos {
+	nodes[i] := strings.Split(infos[i])
+	if len(nodes[i]) < FIELD_EXTRA {
+	    return fmt.Errorf("missing field: %s", infos[i])
+	}
+
+	if nodes[FIELD_MASTER]
+    }
 }
