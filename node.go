@@ -202,6 +202,8 @@ func (conn *redisConn) writeCommand(cmd string, args []interface{}) error {
 		break
 	}
 	switch arg := arg.(type) {
+	case int:
+	    err = conn.writeInt64(int64(arg))
 	case int64:
 	    err = conn.writeInt64(arg)
 	case float64:
