@@ -1,7 +1,9 @@
 package redis
 
 import (
+    "fmt"
     "time"
+    "sync"
 )
 
 const (
@@ -15,6 +17,8 @@ type redisCluster struct {
     timeout	time.Duration
     keepAlive	int
     aliveTime	time.Duration
+
+    mutex	sync.Mutex
 }
 
 
@@ -37,6 +41,16 @@ func New(addrs []string,  timeout time.Duration,
 	}
 
 	cluster.nodes[addrs[i]] = node
+    }
+
+    for _, node := range cluster.nodes {
+	clusterInfo, err := String(node.do("CLUSTER", "NODES"))
+	if err != nil {
+	    fmt.Println(node.address, err)
+	    continue
+	}
+	fmt.Println(clusterInfo)
+	break
     }
 
     return cluster, nil

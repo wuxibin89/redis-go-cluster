@@ -42,7 +42,12 @@ type redisConn struct {
 }
 
 type redisNode struct {
+    // node name, hex string, sha1-size
+    name	string
+
+    // node address, ip:port
     address	string
+
     slots	[CLUSTER_SLOTS/8]uint8
     numSlots	uint16
 
@@ -124,7 +129,6 @@ func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) 
     }
 
     if err = conn.writeCommand(cmd, args); err != nil {
-	fmt.Printf("%s] writeCommand %s\n", time.Now().UTC(), err.Error())
 	conn.shutdown()
 	return nil, err
     }
@@ -226,17 +230,34 @@ func (conn *redisConn) writeCommand(cmd string, args []interface{}) error {
 
 // readLine read a single line terminated with CRLF.
 func (conn *redisConn) readLine() ([]byte, error) {
-    p, err := conn.br.ReadBytes('\n')
-    if err != nil {
-	return nil, err
-    }
+    var line []byte
+    for {
+	p, err := conn.br.ReadBytes('\n')
+	if err != nil {
+	    return nil, err
+	}
 
-    i := len(p) - 2
-    if i < 0 || p[i] != '\r' {
-	return nil, fmt.Errorf("invalid response")
-    }
+	n := len(p) - 2
+	if n < 0 {
+	    return nil, fmt.Errorf("invalid response")
+	}
 
-    return p[:i], nil
+	// bulk string may contain '\n', such as CLUSTER NODES
+	if p[n] != '\r' {
+	    if line != nil {
+		line = append(line, p[:]...)
+	    } else {
+		line = p
+	    }
+	    continue
+	}
+
+	if line != nil {
+	    return append(line, p[:n]...), nil
+	} else {
+	    return p[:n], nil
+	}
+    }
 }
 
 // parseLen parses bulk string and array length.
