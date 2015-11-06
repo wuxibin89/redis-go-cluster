@@ -44,7 +44,6 @@ type redisConn struct {
 type redisNode struct {
     // node name, hex string, sha1-size
     name	string
-
     // node address, ip:port
     address	string
 
@@ -60,6 +59,15 @@ type redisNode struct {
     aliveTime	time.Duration
 
     mutex	sync.Mutex
+    updateChan	chan updateMesg
+}
+
+func (node *redisNode) setSlot(slot uint16) {
+    node.slots[slot>>3] |= 1 << (slot & 0x07)
+}
+
+func (node *redisNode) addSlave(slave *redisNode) {
+    node.slaves = append(node.slaves, slave)
 }
 
 func (node *redisNode) getConn() (*redisConn, error) {
