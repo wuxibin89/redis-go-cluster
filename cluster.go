@@ -120,17 +120,19 @@ func (cluster *redisCluster) updateClustrInfo(node *redisNode) error {
 		    return err
 		}
 	    }
-	}
-
-	// handle slave node
-	slave := cluster.nodes[fields[i][FIELD_ADDR]]
-	for _, v := range nodes {
-	    if v.name == fields[i][FIELD_NAME] {
-		v.addSlave(slave)
-		break
+	} else {
+	    // handle slave node
+	    slave := cluster.nodes[fields[i][FIELD_ADDR]]
+	    for _, v := range nodes {
+	        if v.name == fields[i][FIELD_NAME] {
+		    v.addSlave(slave)
+		    break
+	        }
 	    }
 	}
     }
+
+    cluster.nodes = nodes
 
     return nil
 }
