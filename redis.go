@@ -1,5 +1,5 @@
 package redis
 
 type RedisCluster interface {
-    //TODO
+    Do(cmd string, args ...interface{}) (interface{}, error)
 }

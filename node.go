@@ -59,15 +59,16 @@ type redisNode struct {
     aliveTime	time.Duration
 
     mutex	sync.Mutex
-    updateChan	chan updateMesg
 }
 
 func (node *redisNode) setSlot(slot uint16) {
     node.slots[slot>>3] |= 1 << (slot & 0x07)
+    node.numSlots++
 }
 
 func (node *redisNode) addSlave(slave *redisNode) {
     node.slaves = append(node.slaves, slave)
+    slave.master = node
 }
 
 func (node *redisNode) getConn() (*redisConn, error) {
