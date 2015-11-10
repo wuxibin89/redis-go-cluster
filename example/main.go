@@ -11,7 +11,7 @@ import (
 
 func main() {
     cluster, err := redis.New([]string{"127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"},
-	100 * time.Millisecond, 16, 60 * time.Second, 1 * time.Second)
+	100 * time.Millisecond, 16, 60 * time.Second, 1 * time.Second, 60 * time.Second)
     if err != nil {
 	log.Fatalf("redis.New error: %s", err.Error())
     }

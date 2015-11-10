@@ -9,7 +9,13 @@ import (
 )
 
 const (
-    CLUSTER_SLOTS = 16384
+    CLUSTER_SLOTS	= 16384
+
+    RESP_OK		= 0
+    RESP_MOVED		= 1
+    RESP_ASKING		= 2
+    RESP_CONN_TIMEOUT	= 3
+    RESP_ERROR		= 4
 )
 
 type updateMesg struct {
@@ -26,18 +32,24 @@ type redisCluster struct {
     aliveTime	time.Duration
 
     updateTime	time.Time
-    discardTime time.Duration
     updateList	chan updateMesg
+
+    // sync frequency control, two syncs' interval will be at least discardTime.
+    discardTime	time.Duration
+
+    // local cluster info cache timeout, sync if it's expired.
+    cacheTime	time.Duration
 }
 
 func New(addrs []string,  timeout time.Duration, keepAlive int,
-    aliveTime time.Duration, discardTime time.Duration) (RedisCluster, error) {
+    aliveTime time.Duration, discardTime time.Duration, cacheTime time.Duration) (RedisCluster, error) {
 
     cluster := &redisCluster{
 	timeout: timeout,
 	keepAlive: keepAlive,
 	aliveTime: aliveTime,
 	discardTime: discardTime,
+	cacheTime: cacheTime,
 	updateList: make(chan updateMesg),
     }
 
@@ -78,36 +90,124 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
 	return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
     }
 
-    // handle MOVED redis reply
     reply, err := node.do(cmd, args...)
-    if err == nil {
+    resp := checkReply(reply, err)
+
+    switch(resp) {
+    case RESP_OK, RESP_ERROR:
 	return reply, err
+    case RESP_MOVED:
+	return cluster.handleMoved(node, reply.(redisError).Error(), cmd, args)
+    case RESP_ASKING:
+	return cluster.handleAsking(node, reply.(redisError).Error(), cmd, args)
+    case RESP_CONN_TIMEOUT:
+	return cluster.handleConnTimeout(node, cmd, args)
     }
 
-    errMsg := err.Error()
-    if len(errMsg) < 5 || string(errMsg[:5]) == "MOVED" {
-	return reply, err
-    }
+    panic("unreachable")
+}
 
-    // TODO: what if master down, slave become master?
-
-    fields := strings.Split(errMsg, " ")
+func (cluster *redisCluster) handleMoved(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
+    fields := strings.Split(replyMsg, " ")
     if len(fields) != 3 {
-	return nil, fmt.Errorf("unknown reply: %s", errMsg)
+	return nil, redisError(replyMsg)
     }
 
-    node, ok := cluster.nodes[fields[2]]
+    newNode, ok := cluster.nodes[fields[2]]
     if !ok {
-	return nil, fmt.Errorf("no node %s found in MOVED", fields[2])
+	cluster.sendUpdateMesg(node)
+	return nil, redisError(replyMsg)
     }
 
-    reply, err = node.do(cmd, args)
-
-    // Every time when receiving a MOVED reply, send a update message to 
-    // inform update routine to get newest cluster info.
+    reply, err := newNode.do(cmd, args...)
     cluster.sendUpdateMesg(node)
 
     return reply, err
+}
+
+func (cluster *redisCluster) handleAsking(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
+    // TODO
+    return nil, nil
+}
+
+func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args []interface{}) (interface{}, error) {
+    var randomNode *redisNode
+
+    // choose a random node other than previous one
+    for _, randomNode = range cluster.nodes {
+	if randomNode.address != node.address {
+	    break
+	}
+    }
+
+    reply, err := randomNode.do(cmd, args...)
+    if err != nil {
+	return reply, err
+    }
+
+    if _, ok := reply.(redisError); !ok {
+	return reply, err
+    }
+
+    // ignore replies other than MOVED
+    errMsg := reply.(redisError).Error()
+    if len(errMsg) < 5 || string(errMsg[:5]) != "MOVED" {
+	return reply, err
+    }
+
+    // When MOVED received, we check wether move adress equal to 
+    // previous one. If equal, then it's just an connection timeout 
+    // error, return error and carry on. If not, then the master may 
+    // down or unreachable, a new master has served the slot, request 
+    // new master and update cluster info.
+    // 
+    // TODO: At worst case, it will request redis 3 times on a single 
+    // command, will this be a problem?
+    fields := strings.Split(errMsg, " ")
+    if len(fields) != 3 {
+	return reply, err
+    }
+
+    if fields[2] == node.address {
+	return nil, fmt.Errorf("connection timeout")
+    }
+
+    newNode, ok := cluster.nodes[fields[2]]
+    if !ok {
+	cluster.sendUpdateMesg(randomNode)
+	return nil, redisError(errMsg)
+    }
+
+    reply, err = newNode.do(cmd, args...)
+    cluster.sendUpdateMesg(randomNode)
+
+    return reply, err
+}
+
+func checkReply(reply interface{}, err error) int {
+    if err != nil {
+	return RESP_ERROR
+    }
+
+    if _, ok := reply.(redisError); !ok {
+	return RESP_OK
+    }
+
+    errMsg := reply.(redisError).Error()
+
+    if len(errMsg) >= 5 && string(errMsg[:5]) == "MOVED" {
+	return RESP_MOVED
+    }
+
+    if len(errMsg) >= 6 && string(errMsg[:6]) == "ASKING" {
+	return RESP_ASKING
+    }
+
+    if len(errMsg) >= 15 && string(errMsg[:15]) == "CONNECT_TIMEOUT" {
+	return RESP_CONN_TIMEOUT
+    }
+
+    return RESP_ERROR
 }
 
 func toBytes(arg interface{}) (string, error) {
@@ -208,6 +308,7 @@ func (cluster *redisCluster) updateClustrInfo(node *redisNode) error {
     // TODO: need sync primitive?
     cluster.slots = slots
     cluster.nodes = nodes
+    cluster.updateTime = time.Now()
 
     return nil
 }
@@ -253,7 +354,7 @@ func (cluster *redisCluster) handleUpdateMesg() {
 	case msg := <-cluster.updateList:
 	    // use last update timestamp, moved timestamp and discard time 
 	    // to control cluster info's update frequency.
-	    if !cluster.updateTime.Add(cluster.discardTime).After(msg.movedTime) {
+	    if cluster.updateTime.Add(cluster.discardTime).After(msg.movedTime) {
 	        continue
 	    }
 
@@ -261,7 +362,7 @@ func (cluster *redisCluster) handleUpdateMesg() {
 	    if err != nil {
 	        log.Printf("update cluster info error: %s\n", err.Error())
 	    }
-	case <-time.After(60 * time.Second):
+	case <-time.After(cluster.cacheTime):
 	    for _, v := range cluster.nodes {
 		if err := cluster.updateClustrInfo(v); err != nil {
 		    break

@@ -130,7 +130,7 @@ func (node *redisNode) releaseConn(conn *redisConn) {
 func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) {
     conn, err := node.getConn()
     if err != nil {
-	return nil, err
+	return redisError("CONNECT_TIMEOUT"), nil
     }
 
     if conn.timeout > 0 {
