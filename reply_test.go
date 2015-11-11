@@ -1,20 +1,12 @@
 package redis
 
 import (
-    "time"
-    //"reflect"
     "testing"
     "strconv"
 )
 
 func TestRedisInt(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
-
+    node := newRedisNode()
     _, err := node.do("SET", "count", 10)
     if err != nil {
 	t.Errorf("SET error: %s\n", err.Error())
@@ -48,12 +40,7 @@ func TestRedisInt(t *testing.T) {
 }
 
 func TestRedisInt64(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     count, err := Int64(node.do("LPUSH", "mylist", 10))
     if err != nil {
@@ -89,12 +76,7 @@ func TestRedisInt64(t *testing.T) {
 }
 
 func TestRedisFloat64(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     _, err := node.do("SET", "pi", 3.14)
     if err != nil {
@@ -111,12 +93,7 @@ func TestRedisFloat64(t *testing.T) {
 }
 
 func TestRedisString(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     _, err := node.do("SET", "hello", "hello world")
     if err != nil {
@@ -133,12 +110,7 @@ func TestRedisString(t *testing.T) {
 }
 
 func TestRedisBytes(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     _, err := node.do("SET", "mykey1", "hello world")
     if err != nil {
@@ -155,12 +127,7 @@ func TestRedisBytes(t *testing.T) {
 }
 
 func TestRedisBool(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     _, err := node.do("SET", "mykey2", "true")
     if err != nil {
@@ -190,12 +157,7 @@ func TestRedisBool(t *testing.T) {
 }
 
 func TestRedisInts(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     _, err := node.do("MSET", "key1", 0, "key2", 1, "key3", 2)
     if err != nil {
@@ -211,12 +173,7 @@ func TestRedisInts(t *testing.T) {
 }
 
 func TestRedisStrings(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     _, err := node.do("LPUSH", "mylist2", "aaa")
     if err != nil {
@@ -241,12 +198,7 @@ func TestRedisStrings(t *testing.T) {
 }
 
 func TestRedisStringMap(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     _, err := node.do("HMSET", "hashkey1", "name", "joel", "age", "26", "gender", "male")
     if err != nil {
@@ -269,12 +221,7 @@ func TestRedisStringMap(t *testing.T) {
 }
 
 func TestRedisScan(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
+    node := newRedisNode()
 
     kv := []string{"key1", "hello", "key2", "-1024", "key3", "false", "key4", "-3.14"}
     ikv := make([]interface{}, len(kv))

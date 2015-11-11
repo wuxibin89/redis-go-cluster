@@ -10,8 +10,7 @@ import (
 )
 
 func main() {
-    cluster, err := redis.New([]string{"127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"},
-	100 * time.Millisecond, 16, 60 * time.Second, 1 * time.Second, 60 * time.Second)
+    cluster, err := redis.NewDefaultCluster([]string{"127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"})
     if err != nil {
 	log.Fatalf("redis.New error: %s", err.Error())
     }
@@ -20,7 +19,7 @@ func main() {
     for i := 0; i < 100000; i++ {
 	key := prefix + strconv.Itoa(i)
 
-	_, err := cluster.Do("set", key, i)
+	_, err := cluster.Do("set", key, i*10)
 	if err != nil {
 	    fmt.Printf("-set %s: %s\n", key, err.Error())
 	    time.Sleep(100 * time.Millisecond)
@@ -32,7 +31,7 @@ func main() {
 	    time.Sleep(100 * time.Millisecond)
 	    continue
 	}
-	if value != i {
+	if value != i*10 {
 	    fmt.Printf("-mismatch %s: %d\n", key, value)
 	    time.Sleep(100 * time.Millisecond)
 	    continue

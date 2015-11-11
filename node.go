@@ -31,13 +31,16 @@ type redisConn struct {
     br	*bufio.Reader
     bw	*bufio.Writer
 
-    timeout	time.Duration
+    readTimeout	    time.Duration
+    writeTimeout    time.Duration
+
+    // Pending replies to be read in redis pipeling.
+    pending	int
 
     // Scratch space for formatting argument length.
-    // '*' or '$', length, "\r\n"
     lenScratch [32]byte
 
-    // Scratch space for formatting integers and floats.
+    // Scratch space for formatting integer and float.
     numScratch [40]byte
 }
 
@@ -54,9 +57,12 @@ type redisNode struct {
     master	*redisNode
 
     conns	list.List
-    timeout	time.Duration
     keepAlive	int
     aliveTime	time.Duration
+
+    connTimeout	    time.Duration
+    readTimeout	    time.Duration
+    writeTimeout    time.Duration
 
     mutex	sync.Mutex
 }
@@ -75,14 +81,14 @@ func (node *redisNode) getConn() (*redisConn, error) {
     node.mutex.Lock()
 
     // remove stale connections
-    if node.timeout > 0 {
+    if node.connTimeout > 0 {
 	for {
 	    elem := node.conns.Back()
 	    if elem == nil {
 		break
 	    }
 	    conn := elem.Value.(*redisConn)
-	    if conn.t.Add(node.timeout).After(time.Now()) {
+	    if conn.t.Add(node.connTimeout).After(time.Now()) {
 		break
 	    }
 	    node.conns.Remove(elem)
@@ -92,7 +98,7 @@ func (node *redisNode) getConn() (*redisConn, error) {
     if node.conns.Len() <= 0 {
 	node.mutex.Unlock()
 
-	c, err := net.DialTimeout("tcp", node.address, node.timeout)
+	c, err := net.DialTimeout("tcp", node.address, node.connTimeout)
 	if err != nil {
 	    return nil, err
 	}
@@ -101,7 +107,8 @@ func (node *redisNode) getConn() (*redisConn, error) {
 	    c: c,
 	    br: bufio.NewReader(c),
 	    bw: bufio.NewWriter(c),
-	    timeout: node.timeout,
+	    readTimeout: node.readTimeout,
+	    writeTimeout: node.writeTimeout,
 	}
 
 	return conn, nil
@@ -115,6 +122,12 @@ func (node *redisNode) getConn() (*redisConn, error) {
 }
 
 func (node *redisNode) releaseConn(conn *redisConn) {
+    // Connection still has pending replies, just close it.
+    if conn.pending > 0 {
+	conn.shutdown()
+	return
+    }
+
     node.mutex.Lock()
     defer node.mutex.Unlock()
 
@@ -127,26 +140,68 @@ func (node *redisNode) releaseConn(conn *redisConn) {
     node.conns.PushFront(conn)
 }
 
+func (conn *redisConn) shutdown() {
+    conn.c.Close()
+}
+
+func (conn *redisConn) send(cmd string, args ...interface{}) error {
+    conn.pending += 1
+
+    if conn.writeTimeout > 0 {
+	conn.c.SetWriteDeadline(time.Now().Add(conn.writeTimeout))
+    }
+
+    if err := conn.writeCommand(cmd, args); err != nil {
+	return err
+    }
+
+    return nil
+}
+
+func (conn *redisConn) flush() error {
+    if conn.writeTimeout > 0 {
+	conn.c.SetWriteDeadline(time.Now().Add(conn.writeTimeout))
+    }
+
+    if err := conn.bw.Flush(); err != nil {
+	return err
+    }
+
+    return nil
+}
+
+func (conn *redisConn) receive() (interface{}, error) {
+    if conn.readTimeout > 0 {
+	conn.c.SetWriteDeadline(time.Now().Add(conn.readTimeout))
+    }
+
+    if conn.pending <= 0 {
+	return redisError("ENOPENDING"), nil
+    }
+
+    conn.pending -= 1
+
+    return conn.readReply()
+}
+
 func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) {
     conn, err := node.getConn()
     if err != nil {
-	return redisError("CONNECT_TIMEOUT"), nil
+	conn.shutdown()
+	return redisError("ECONNTIMEOUT"), nil
     }
 
-    if conn.timeout > 0 {
-	conn.c.SetWriteDeadline(time.Now().Add(conn.timeout))
-    }
-
-    if err = conn.writeCommand(cmd, args); err != nil {
+    if err = conn.send(cmd, args...); err != nil {
 	conn.shutdown()
 	return nil, err
     }
 
-    if conn.timeout > 0 {
-	conn.c.SetReadDeadline(time.Now().Add(conn.timeout))
+    if err = conn.flush(); err != nil {
+	conn.shutdown()
+	return nil, err
     }
 
-    reply, err := conn.readReply()
+    reply, err := conn.receive()
     if err != nil {
 	conn.shutdown()
 	return nil, err
@@ -154,11 +209,7 @@ func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) 
 
     node.releaseConn(conn)
 
-    return reply, nil
-}
-
-func (conn *redisConn) shutdown() {
-    conn.c.Close()
+    return reply, err
 }
 
 func (conn *redisConn) writeLen(prefix byte, n int) error {
@@ -228,10 +279,6 @@ func (conn *redisConn) writeCommand(cmd string, args []interface{}) error {
 	default:
 	    err = fmt.Errorf("unknown type %T", arg)
 	}
-    }
-
-    if err == nil {
-	err = conn.bw.Flush()
     }
 
     return err

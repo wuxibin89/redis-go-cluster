@@ -6,13 +6,7 @@ import (
 )
 
 func TestRedisConn(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 50 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
-
+    node := newRedisNode()
     conn, err := node.getConn()
     if err != nil {
 	t.Errorf("getConn error: %s\n", err.Error())
@@ -63,13 +57,7 @@ func TestRedisConn(t *testing.T) {
 }
 
 func TestRedisDo(t *testing.T) {
-    node := &redisNode{
-	address: "127.0.0.1:6379",
-	timeout: 200 * time.Millisecond,
-	keepAlive: 3,
-	aliveTime: 30 * time.Second,
-    }
-
+    node := newRedisNode()
 
     _, err := node.do("FLUSHALL")
 
@@ -143,5 +131,87 @@ func TestRedisDo(t *testing.T) {
     }
     if value, ok := reply.([]interface{}); !ok || len(value) != 6 {
 	t.Errorf("unexpected value %v\n", reply)
+    }
+}
+
+func TestRedisPipeline(t *testing.T) {
+    node := newRedisNode()
+    conn, err := node.getConn()
+    if err != nil {
+	t.Errorf("getConn error: %s\n", err.Error())
+    }
+
+    err = conn.send("PING")
+    if err != nil {
+	t.Errorf("send error: %s\n", err.Error())
+    }
+    err = conn.send("PING")
+    if err != nil {
+	t.Errorf("send error: %s\n", err.Error())
+    }
+    err = conn.send("PING")
+    if err != nil {
+	t.Errorf("send error: %s\n", err.Error())
+    }
+
+    err = conn.flush()
+    if err != nil {
+	t.Errorf("flush error: %s\n", err.Error())
+    }
+
+    reply, err := String(conn.receive())
+    if err != nil {
+	t.Errorf("flush error: %s\n", err.Error())
+    }
+    if reply != "PONG" {
+	t.Errorf("receive error: %s", reply)
+    }
+    reply, err = String(conn.receive())
+    if err != nil {
+	t.Errorf("receive error: %s\n", err.Error())
+    }
+    if reply != "PONG" {
+	t.Errorf("receive error: %s", reply)
+    }
+    reply, err = String(conn.receive())
+    if err != nil {
+	t.Errorf("receive error: %s\n", err.Error())
+    }
+    if reply != "PONG" {
+	t.Errorf("receive error: %s", reply)
+    }
+    reply, err = String(conn.receive())
+    if err == nil {
+	t.Errorf("expect an error here")
+    }
+    if err.Error() != "ENOPENDING" {
+	t.Errorf("unexpected error: %s\n", err.Error())
+    }
+
+
+    conn.send("SET", "mycount", 100)
+    conn.send("INCR", "mycount")
+    conn.send("INCRBY", "mycount", 20)
+    conn.send("INCRBY", "mycount", 20)
+
+    conn.flush()
+
+    conn.receive()
+    conn.receive()
+    conn.receive()
+    value, err := Int(conn.receive())
+    if value != 141 {
+	t.Errorf("unexpected error: %d\n", reply)
+    }
+}
+
+func newRedisNode() *redisNode {
+    return &redisNode{
+	address: "127.0.0.1:6379",
+	keepAlive: 3,
+	aliveTime: 60 * time.Second,
+	connTimeout: 50 * time.Millisecond,
+	readTimeout: 50 * time.Millisecond,
+	writeTimeout: 50 * time.Millisecond,
     }
 }

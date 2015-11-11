@@ -79,7 +79,7 @@ var crc16tab = [256]uint16{
     0x6e17,0x7e36,0x4e55,0x5e74,0x2e93,0x3eb2,0x0ed1,0x1ef0,
 }
 
-func crc16(buf []byte) uint16 {
+func crc16(buf string) uint16 {
     var crc uint16
     for _, n := range buf {
         crc = (crc<<uint16(8)) ^ crc16tab[((crc>>uint16(8)) ^ uint16(n))&0x00FF];

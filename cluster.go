@@ -12,8 +12,8 @@ const (
     CLUSTER_SLOTS	= 16384
 
     RESP_OK		= 0
-    RESP_MOVED		= 1
-    RESP_ASKING		= 2
+    RESP_MOVE		= 1
+    RESP_ASK		= 2
     RESP_CONN_TIMEOUT	= 3
     RESP_ERROR		= 4
 )
@@ -27,38 +27,38 @@ type redisCluster struct {
     slots	[]*redisNode
     nodes	map[string]*redisNode
 
-    timeout	time.Duration
+    connTimeout time.Duration
+    readTimeout time.Duration
+    writeTimeout time.Duration
+
     keepAlive	int
     aliveTime	time.Duration
 
     updateTime	time.Time
     updateList	chan updateMesg
 
-    // sync frequency control, two syncs' interval will be at least discardTime.
     discardTime	time.Duration
-
-    // local cluster info cache timeout, sync if it's expired.
-    cacheTime	time.Duration
 }
 
-func New(addrs []string,  timeout time.Duration, keepAlive int,
-    aliveTime time.Duration, discardTime time.Duration, cacheTime time.Duration) (RedisCluster, error) {
-
+func NewRedisCluster(options *RedisOptions) (RedisCluster, error) {
     cluster := &redisCluster{
-	timeout: timeout,
-	keepAlive: keepAlive,
-	aliveTime: aliveTime,
-	discardTime: discardTime,
-	cacheTime: cacheTime,
+	connTimeout: options.connTimeout,
+	readTimeout: options.readTimeout,
+	writeTimeout: options.writeTimeout,
+	keepAlive: options.keepAlive,
+	aliveTime: options.aliveTime,
+	discardTime: options.discardTime,
 	updateList: make(chan updateMesg),
     }
 
-    for i := range addrs {
+    for i := range options.startNodes {
 	node := &redisNode{
-	    address: addrs[i],
-	    timeout: timeout,
-	    keepAlive: keepAlive,
-	    aliveTime: aliveTime,
+	    address: options.startNodes[i],
+	    connTimeout: options.connTimeout,
+	    readTimeout: options.readTimeout,
+	    writeTimeout: options.writeTimeout,
+	    keepAlive: options.keepAlive,
+	    aliveTime: options.aliveTime,
 	}
 
 	err := cluster.updateClustrInfo(node)
@@ -71,7 +71,7 @@ func New(addrs []string,  timeout time.Duration, keepAlive int,
 	}
     }
 
-    return nil, fmt.Errorf("no invalid node in %v", addrs)
+    return nil, fmt.Errorf("no invalid node in %v", options.startNodes)
 }
 
 func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, error) {
@@ -84,8 +84,8 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
 	return nil, fmt.Errorf("invalid key %v", args[0])
     }
 
-    slot := crc16([]byte(key))
-    node := cluster.slots[slot % CLUSTER_SLOTS]
+    slot := hashSlot(key)
+    node := cluster.slots[slot]
     if node == nil {
 	return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
     }
@@ -96,10 +96,10 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     switch(resp) {
     case RESP_OK, RESP_ERROR:
 	return reply, err
-    case RESP_MOVED:
-	return cluster.handleMoved(node, reply.(redisError).Error(), cmd, args)
-    case RESP_ASKING:
-	return cluster.handleAsking(node, reply.(redisError).Error(), cmd, args)
+    case RESP_MOVE:
+	return cluster.handleMove(node, reply.(redisError).Error(), cmd, args)
+    case RESP_ASK:
+	return cluster.handleAsk(node, reply.(redisError).Error(), cmd, args)
     case RESP_CONN_TIMEOUT:
 	return cluster.handleConnTimeout(node, cmd, args)
     }
@@ -107,7 +107,7 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     panic("unreachable")
 }
 
-func (cluster *redisCluster) handleMoved(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
+func (cluster *redisCluster) handleMove(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
     fields := strings.Split(replyMsg, " ")
     if len(fields) != 3 {
 	return nil, redisError(replyMsg)
@@ -125,9 +125,47 @@ func (cluster *redisCluster) handleMoved(node *redisNode, replyMsg, cmd string, 
     return reply, err
 }
 
-func (cluster *redisCluster) handleAsking(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
-    // TODO
-    return nil, nil
+func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
+    fields := strings.Split(replyMsg, " ")
+    if len(fields) != 3 {
+	return nil, redisError(replyMsg)
+    }
+
+    newNode, ok := cluster.nodes[fields[2]]
+    if !ok {
+	cluster.sendUpdateMesg(node)
+	return nil, redisError(replyMsg)
+    }
+
+    conn, err := newNode.getConn()
+    if err != nil {
+	return nil, redisError(replyMsg)
+    }
+
+    conn.send("ASKING")
+    conn.send(cmd, args...)
+
+    err = conn.flush()
+    if err != nil {
+	conn.shutdown()
+	return nil, err
+    }
+
+    re, err := String(conn.receive())
+    if err != nil || re != "OK" {
+	conn.shutdown()
+	return nil, redisError(replyMsg)
+    }
+
+    reply, err := conn.receive()
+    if err != nil {
+	conn.shutdown()
+	return nil, err
+    }
+
+    node.releaseConn(conn)
+
+    return reply, err
 }
 
 func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args []interface{}) (interface{}, error) {
@@ -195,15 +233,15 @@ func checkReply(reply interface{}, err error) int {
 
     errMsg := reply.(redisError).Error()
 
+    if len(errMsg) >= 3 && string(errMsg[:3]) == "ASK" {
+	return RESP_ASK
+    }
+
     if len(errMsg) >= 5 && string(errMsg[:5]) == "MOVED" {
-	return RESP_MOVED
+	return RESP_MOVE
     }
 
-    if len(errMsg) >= 6 && string(errMsg[:6]) == "ASKING" {
-	return RESP_ASKING
-    }
-
-    if len(errMsg) >= 15 && string(errMsg[:15]) == "CONNECT_TIMEOUT" {
+    if len(errMsg) >= 12 && string(errMsg[:12]) == "ECONNTIMEOUT" {
 	return RESP_CONN_TIMEOUT
     }
 
@@ -262,7 +300,9 @@ func (cluster *redisCluster) updateClustrInfo(node *redisNode) error {
 	    name: fields[i][FIELD_NAME],
 	    address: fields[i][FIELD_ADDR],
 	    slaves: make([]*redisNode, 0),
-	    timeout: cluster.timeout,
+	    connTimeout: cluster.connTimeout,
+	    readTimeout: cluster.readTimeout,
+	    writeTimeout: cluster.writeTimeout,
 	    keepAlive: cluster.keepAlive,
 	    aliveTime: cluster.aliveTime,
 	}
@@ -350,24 +390,16 @@ func setSlot(slots []*redisNode, nodes map[string]*redisNode, address, field str
 
 func (cluster *redisCluster) handleUpdateMesg() {
     for {
-	select {
-	case msg := <-cluster.updateList:
-	    // use last update timestamp, moved timestamp and discard time 
-	    // to control cluster info's update frequency.
-	    if cluster.updateTime.Add(cluster.discardTime).After(msg.movedTime) {
-	        continue
-	    }
+	msg := <-cluster.updateList
+	// use last update timestamp, moved timestamp and discard time 
+	// to control cluster info's update frequency.
+	if cluster.updateTime.Add(cluster.discardTime).After(msg.movedTime) {
+	    continue
+	}
 
-	    err := cluster.updateClustrInfo(msg.node)
-	    if err != nil {
-	        log.Printf("update cluster info error: %s\n", err.Error())
-	    }
-	case <-time.After(cluster.cacheTime):
-	    for _, v := range cluster.nodes {
-		if err := cluster.updateClustrInfo(v); err != nil {
-		    break
-		}
-	    }
+	err := cluster.updateClustrInfo(msg.node)
+	if err != nil {
+	    log.Printf("update cluster info error: %s\n", err.Error())
 	}
     }
 }
@@ -384,6 +416,31 @@ func (cluster *redisCluster) sendUpdateMesg(node *redisNode) {
     default:
 	// Update channel full, just carry on.
     }
+}
+
+func hashSlot(key string) uint16 {
+    var s, e int
+    for s = 0; s < len(key); s++ {
+	if key[s] == '{' {
+	    break
+	}
+    }
+
+    if s == len(key) {
+	return crc16(key) & (CLUSTER_SLOTS-1)
+    }
+
+    for e = s+1; e < len(key); e++ {
+	if key[e] == '}' {
+	    break
+	}
+    }
+
+    if e == len(key) || e == s+1 {
+	return crc16(key) & (CLUSTER_SLOTS-1)
+    }
+
+    return crc16(key[s+1:e]) & (CLUSTER_SLOTS-1)
 }
 
 func init() {
