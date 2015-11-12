@@ -6,7 +6,7 @@ import (
     "time"
     "strconv"
 
-    "github.com/Chasex/redis-go-cluster"
+    "github.com/chasex/redis-go-cluster"
 )
 
 func main() {

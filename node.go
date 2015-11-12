@@ -176,7 +176,7 @@ func (conn *redisConn) receive() (interface{}, error) {
     }
 
     if conn.pending <= 0 {
-	return redisError("ENOPENDING"), nil
+	return nil, fmt.Errorf("no more pending reply")
     }
 
     conn.pending -= 1

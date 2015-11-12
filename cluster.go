@@ -74,9 +74,29 @@ func NewRedisCluster(options *RedisOptions) (RedisCluster, error) {
     return nil, fmt.Errorf("no invalid node in %v", options.startNodes)
 }
 
+// Do excute a redis command with random number arguments. First argument will
+// be used as key to hash to a slot, so it only supports a subset of redis 
+// commands.
+///
+// SUPPORTED: most commands of keys, strings, lists, sets, sorted sets, hashes.
+// NOT SUPPORTED: scripts, transactions, clusters.
+// 
+// Particularly, MSET/MSETNX/MGET are supported using result aggregation. 
+// To MSET/MSETNX, there's no atomicity gurantee that given keys are set at once.
+// It's possible that some keys are set, while others not.
+//
+// See full redis command list: http://www.redis.io/commands
 func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, error) {
     if len(args) < 1 {
 	return nil, fmt.Errorf("no key found in args")
+    }
+
+    if cmd == "MSET" || cmd == "MSETNX" {
+	return cluster.multiSet(cmd, args...)
+    }
+
+    if cmd == "MGET" {
+	return cluster.multiGet(cmd, args...)
     }
 
     key, err := toBytes(args[0])
@@ -105,6 +125,178 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     }
 
     panic("unreachable")
+}
+
+type subTask struct {
+    node    *redisNode
+    slot    uint16
+
+    cmd	    string
+    args    []interface{}
+
+    reply   []interface{}
+    err	    error
+
+    done    chan int
+}
+
+func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interface{}, error) {
+    if len(args) & 1 != 0 {
+	return nil, fmt.Errorf("invalid args")
+    }
+
+    tasks := make([]*subTask, 0)
+    index := make([]*subTask, len(args)>>1)
+
+    for i := 0; i < len(args); i += 2 {
+	key, err := toBytes(args[i])
+	if err != nil {
+	    return nil, fmt.Errorf("invalid key %v", args[i])
+	}
+
+	slot := hashSlot(key)
+
+	var j int
+	for j := 0; j < len(tasks); j++ {
+	    if tasks[j].slot == slot {
+		tasks[j].args = append(tasks[j].args, args[i])	    // key
+		tasks[j].args = append(tasks[j].args, args[i+1])    // value
+		index[i>>1] = tasks[j]
+
+		break
+	    }
+	}
+
+	if j == len(tasks) {
+	    node := cluster.slots[slot]
+	    if node == nil {
+		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
+	    }
+
+	    task := &subTask{
+		node: node,
+		slot: slot,
+		cmd: cmd,
+		args: []interface{}{args[i], args[i+1]},
+		done: make(chan int),
+	    }
+	    tasks = append(tasks, task)
+	    index[i>>1] = tasks[j]
+	}
+    }
+
+    for i := range tasks {
+	fmt.Printf("task[%d]: %s %v\n", i, tasks[i].cmd, tasks[i].args)
+	go func() {
+	    tasks[i].reply, tasks[i].err = Values(tasks[i].node.do(tasks[i].cmd, tasks[i].args...))
+	    tasks[i].done <- 1
+	}()
+    }
+
+    for i := range tasks {
+	<-tasks[i].done
+    }
+
+    reply := make([]interface{}, len(args)>>1)
+    for i := range reply {
+	if index[i].err != nil {
+	    errMsg := index[i].err.Error()
+	    if len(errMsg) >= 5 && string(errMsg[:5]) == "MOVED" {
+		cluster.sendUpdateMesg(index[i].node)
+		return nil, index[i].err
+	    }
+
+	    fmt.Printf("oops, error occur: %s\n", index[i].err.Error())
+
+	    return nil, index[i].err
+	}
+
+	if len(index[i].reply) < 0 {
+	    panic("unreachable")
+	}
+
+	reply = append(reply, index[i].reply[0])
+	index[i].reply = index[i].reply[1:]
+    }
+
+    return reply, nil
+}
+
+func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interface{}, error) {
+    tasks := make([]*subTask, 0)
+    index := make([]*subTask, len(args))
+
+    for i := 0; i < len(args); i++ {
+	key, err := toBytes(args[i])
+	if err != nil {
+	    return nil, fmt.Errorf("invalid key %v", args[i])
+	}
+
+	slot := hashSlot(key)
+
+	var j int
+	for j := 0; j < len(tasks); j++ {
+	    if tasks[j].slot == slot {
+		tasks[j].args = append(tasks[j].args, args[i])	    // key
+		index[i] = tasks[j]
+
+		break
+	    }
+	}
+
+	if j == len(tasks) {
+	    node := cluster.slots[slot]
+	    if node == nil {
+		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
+	    }
+
+	    task := &subTask{
+		node: node,
+		slot: slot,
+		cmd: cmd,
+		args: []interface{}{args[i]},
+		done: make(chan int),
+	    }
+	    tasks = append(tasks, task)
+	    index[i] = tasks[j]
+	}
+    }
+
+    for i := range tasks {
+	fmt.Printf("task[%d]: %s %v\n", i, tasks[i].cmd, tasks[i].args)
+	go func() {
+	    tasks[i].reply, tasks[i].err = Values(tasks[i].node.do(tasks[i].cmd, tasks[i].args...))
+	    tasks[i].done <- 1
+	}()
+    }
+
+    for i := range tasks {
+	<-tasks[i].done
+    }
+
+    reply := make([]interface{}, len(args))
+    for i := range reply {
+	if index[i].err != nil {
+	    errMsg := index[i].err.Error()
+	    if len(errMsg) >= 5 && string(errMsg[:5]) == "MOVED" {
+		cluster.sendUpdateMesg(index[i].node)
+		return nil, index[i].err
+	    }
+
+	    fmt.Printf("oops, error occur: %s\n", index[i].err.Error())
+
+	    return nil, index[i].err
+	}
+
+	if len(index[i].reply) < 0 {
+	    panic("unreachable")
+	}
+
+	reply = append(reply, index[i].reply[0])
+	index[i].reply = index[i].reply[1:]
+    }
+
+    return reply, nil
 }
 
 func (cluster *redisCluster) handleMove(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {

@@ -184,7 +184,7 @@ func TestRedisPipeline(t *testing.T) {
     if err == nil {
 	t.Errorf("expect an error here")
     }
-    if err.Error() != "ENOPENDING" {
+    if err.Error() != "no more pending reply" {
 	t.Errorf("unexpected error: %s\n", err.Error())
     }
 
