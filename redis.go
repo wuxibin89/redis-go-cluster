@@ -4,7 +4,7 @@ import (
     "time"
 )
 
-type RedisOptions struct {
+type Options struct {
     startNodes	    []string
 
     connTimeout	    time.Duration
@@ -17,12 +17,18 @@ type RedisOptions struct {
     discardTime	    time.Duration
 }
 
-type RedisCluster interface {
+type Cluster interface {
     Do(cmd string, args ...interface{}) (interface{}, error)
+    NewBatch() Batch
+    RunBatch(batch Batch) (interface{}, error)
 }
 
-func NewDefaultCluster(addrs []string) (RedisCluster, error) {
-    return NewRedisCluster(&RedisOptions{
+type Batch interface {
+    Put(cmd string, args ...interface{}) error
+}
+
+func NewDefaultCluster(addrs []string) (Cluster, error) {
+    return NewCluster(&Options{
 	startNodes: addrs,
 	connTimeout: 50 * time.Millisecond,
 	readTimeout: 50 * time.Millisecond,

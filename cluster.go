@@ -4,6 +4,7 @@ import (
     "log"
     "fmt"
     "time"
+    "sync"
     "strings"
     "strconv"
     "errors"
@@ -39,9 +40,95 @@ type redisCluster struct {
     updateList	chan updateMesg
 
     discardTime	time.Duration
+
+    rwLock	sync.RWMutex
 }
 
-func NewRedisCluster(options *RedisOptions) (RedisCluster, error) {
+type nodeCommand struct {
+    cmd	    string
+    args    []interface{}
+    reply   interface{}
+    err	    error
+}
+
+type nodeBatch struct {
+    node    *redisNode
+    cmds    []nodeCommand
+    done    chan int
+}
+
+type redisBatch struct {
+    cluster	*redisCluster
+    batches	[]nodeBatch
+    index	[]int
+}
+
+func (batch *redisBatch) Put(cmd string, args ...interface{}) error {
+    if len(args) < 1 {
+	return errors.New("no key found in args")
+    }
+
+    key, err := toBytes(args[0])
+    if err != nil {
+	return err
+    }
+
+    slot := hashSlot(key)
+    batch.cluster.rwLock.RLock()
+    node := batch.cluster.slots[slot]
+    batch.cluster.rwLock.RUnlock()
+
+    if node == nil {
+	return fmt.Errorf("no node serve slot %d for key %s", slot, key)
+    }
+
+    var i int
+    for i = range batch.batches {
+	if batch.batches[i].node == node {
+	    batch.batches[i].cmds = append(batch.batches[i].cmds,
+		nodeCommand{cmd: cmd, args: args})
+
+	    batch.index = append(batch.index, i)
+	    break
+	}
+    }
+
+    if i == len(batch.batches) {
+	batch.batches = append(batch.batches,
+	    nodeBatch{
+		node: node,
+		cmds: []nodeCommand{{cmd, args, nil, nil}},
+		done: make(chan int)})
+	batch.index = append(batch.index, i)
+    }
+
+    return nil
+}
+
+func (cluster *redisCluster) NewBatch() Batch {
+    return &redisBatch{
+	cluster: cluster,
+	batches: make([]nodeBatch, 0),
+	index: make([]int, 0),
+    }
+}
+
+func (cluster *redisCluster) RunBatch(batch Batch) (interface{}, error) {
+    bat := batch.(*redisBatch)
+
+    for i := range bat.batches {
+	go doBatch(bat.batches[i])
+    }
+
+    return nil, nil
+}
+
+func doBatch(batch nodeBatch) {
+    conn := batch.node.getConn()
+    if 
+}
+
+func NewCluster(options *Options) (Cluster, error) {
     cluster := &redisCluster{
 	connTimeout: options.connTimeout,
 	readTimeout: options.readTimeout,
@@ -106,7 +193,11 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     }
 
     slot := hashSlot(key)
+
+    cluster.rwLock.RLock()
     node := cluster.slots[slot]
+    cluster.rwLock.RUnlock()
+
     if node == nil {
 	return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
     }
@@ -132,7 +223,7 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     panic("unreachable")
 }
 
-type subTask struct {
+type multiTask struct {
     node    *redisNode
     slot    uint16
 
@@ -151,8 +242,9 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
 	return nil, fmt.Errorf("invalid args %v", args)
     }
 
-    tasks := make([]*subTask, 0)
+    tasks := make([]*multiTask, 0)
 
+    cluster.rwLock.RLock()
     for i := 0; i < len(args); i += 2 {
 	key, err := toBytes(args[i])
 	if err != nil {
@@ -177,7 +269,7 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
 		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
 	    }
 
-	    task := &subTask{
+	    task := &multiTask{
 		node: node,
 		slot: slot,
 		cmd: cmd,
@@ -187,6 +279,7 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
 	    tasks = append(tasks, task)
 	}
     }
+    cluster.rwLock.RUnlock()
 
     for i := range tasks {
 	go handleSetTask(tasks[i])
@@ -207,9 +300,10 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
 }
 
 func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interface{}, error) {
-    tasks := make([]*subTask, 0)
-    index := make([]*subTask, len(args))
+    tasks := make([]*multiTask, 0)
+    index := make([]*multiTask, len(args))
 
+    cluster.rwLock.RLock()
     for i := 0; i < len(args); i++ {
 	key, err := toBytes(args[i])
 	if err != nil {
@@ -234,7 +328,7 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
 		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
 	    }
 
-	    task := &subTask{
+	    task := &multiTask{
 		node: node,
 		slot: slot,
 		cmd: cmd,
@@ -245,6 +339,7 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
 	    index[i] = tasks[j]
 	}
     }
+    cluster.rwLock.RUnlock()
 
     for i := range tasks {
 	go handleGetTask(tasks[i])
@@ -271,12 +366,12 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
     return reply, nil
 }
 
-func handleSetTask(task *subTask) {
+func handleSetTask(task *multiTask) {
     task.reply, task.err = task.node.do(task.cmd, task.args...)
     task.done <- 1
 }
 
-func handleGetTask(task *subTask) {
+func handleGetTask(task *multiTask) {
     task.replies, task.err = Values(task.node.do(task.cmd, task.args...))
     task.done <- 1
 }
