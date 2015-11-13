@@ -18,7 +18,7 @@ func main() {
 	log.Fatalf("MSET error: %s", err.Error())
     }
 
-    values, err := redis.Strings(cluster.Do("MGET", "myfoo1", "myfoo2", "myfoo3"))
+    values, err := redis.Strings(cluster.Do("MGET", "myfoo1", "myfoo5", "myfoo2", "myfoo3", "myfoo4"))
     if err != nil {
 	log.Fatalf("MGET error: %s", err.Error())
     }

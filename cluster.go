@@ -6,6 +6,7 @@ import (
     "time"
     "strings"
     "strconv"
+    "errors"
 )
 
 const (
@@ -111,7 +112,11 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     }
 
     reply, err := node.do(cmd, args...)
-    resp := checkReply(reply, err)
+    if err != nil {
+	return reply, err
+    }
+
+    resp := checkReply(reply)
 
     switch(resp) {
     case RESP_OK, RESP_ERROR:
@@ -134,7 +139,8 @@ type subTask struct {
     cmd	    string
     args    []interface{}
 
-    reply   []interface{}
+    reply   interface{}
+    replies []interface{}
     err	    error
 
     done    chan int
@@ -142,11 +148,10 @@ type subTask struct {
 
 func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interface{}, error) {
     if len(args) & 1 != 0 {
-	return nil, fmt.Errorf("invalid args")
+	return nil, fmt.Errorf("invalid args %v", args)
     }
 
     tasks := make([]*subTask, 0)
-    index := make([]*subTask, len(args)>>1)
 
     for i := 0; i < len(args); i += 2 {
 	key, err := toBytes(args[i])
@@ -157,11 +162,10 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
 	slot := hashSlot(key)
 
 	var j int
-	for j := 0; j < len(tasks); j++ {
+	for j = 0; j < len(tasks); j++ {
 	    if tasks[j].slot == slot {
 		tasks[j].args = append(tasks[j].args, args[i])	    // key
 		tasks[j].args = append(tasks[j].args, args[i+1])    // value
-		index[i>>1] = tasks[j]
 
 		break
 	    }
@@ -181,45 +185,25 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
 		done: make(chan int),
 	    }
 	    tasks = append(tasks, task)
-	    index[i>>1] = tasks[j]
 	}
     }
 
     for i := range tasks {
-	fmt.Printf("task[%d]: %s %v\n", i, tasks[i].cmd, tasks[i].args)
-	go func() {
-	    tasks[i].reply, tasks[i].err = Values(tasks[i].node.do(tasks[i].cmd, tasks[i].args...))
-	    tasks[i].done <- 1
-	}()
+	go handleSetTask(tasks[i])
     }
 
     for i := range tasks {
 	<-tasks[i].done
     }
 
-    reply := make([]interface{}, len(args)>>1)
-    for i := range reply {
-	if index[i].err != nil {
-	    errMsg := index[i].err.Error()
-	    if len(errMsg) >= 5 && string(errMsg[:5]) == "MOVED" {
-		cluster.sendUpdateMesg(index[i].node)
-		return nil, index[i].err
-	    }
-
-	    fmt.Printf("oops, error occur: %s\n", index[i].err.Error())
-
-	    return nil, index[i].err
+    for i := range tasks {
+	_, err := String(tasks[i].reply, tasks[i].err)
+	if err != nil {
+	    return nil, err
 	}
-
-	if len(index[i].reply) < 0 {
-	    panic("unreachable")
-	}
-
-	reply = append(reply, index[i].reply[0])
-	index[i].reply = index[i].reply[1:]
     }
 
-    return reply, nil
+    return "OK", nil
 }
 
 func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interface{}, error) {
@@ -235,7 +219,7 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
 	slot := hashSlot(key)
 
 	var j int
-	for j := 0; j < len(tasks); j++ {
+	for j = 0; j < len(tasks); j++ {
 	    if tasks[j].slot == slot {
 		tasks[j].args = append(tasks[j].args, args[i])	    // key
 		index[i] = tasks[j]
@@ -263,11 +247,7 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
     }
 
     for i := range tasks {
-	fmt.Printf("task[%d]: %s %v\n", i, tasks[i].cmd, tasks[i].args)
-	go func() {
-	    tasks[i].reply, tasks[i].err = Values(tasks[i].node.do(tasks[i].cmd, tasks[i].args...))
-	    tasks[i].done <- 1
-	}()
+	go handleGetTask(tasks[i])
     }
 
     for i := range tasks {
@@ -277,38 +257,40 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
     reply := make([]interface{}, len(args))
     for i := range reply {
 	if index[i].err != nil {
-	    errMsg := index[i].err.Error()
-	    if len(errMsg) >= 5 && string(errMsg[:5]) == "MOVED" {
-		cluster.sendUpdateMesg(index[i].node)
-		return nil, index[i].err
-	    }
-
-	    fmt.Printf("oops, error occur: %s\n", index[i].err.Error())
-
 	    return nil, index[i].err
 	}
 
-	if len(index[i].reply) < 0 {
+	if len(index[i].replies) < 0 {
 	    panic("unreachable")
 	}
 
-	reply = append(reply, index[i].reply[0])
-	index[i].reply = index[i].reply[1:]
+	reply[i] = index[i].replies[0]
+	index[i].replies = index[i].replies[1:]
     }
 
     return reply, nil
 }
 
+func handleSetTask(task *subTask) {
+    task.reply, task.err = task.node.do(task.cmd, task.args...)
+    task.done <- 1
+}
+
+func handleGetTask(task *subTask) {
+    task.replies, task.err = Values(task.node.do(task.cmd, task.args...))
+    task.done <- 1
+}
+
 func (cluster *redisCluster) handleMove(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
     fields := strings.Split(replyMsg, " ")
     if len(fields) != 3 {
-	return nil, redisError(replyMsg)
+	return nil, errors.New(replyMsg)
     }
 
     newNode, ok := cluster.nodes[fields[2]]
     if !ok {
 	cluster.sendUpdateMesg(node)
-	return nil, redisError(replyMsg)
+	return nil, errors.New(replyMsg)
     }
 
     reply, err := newNode.do(cmd, args...)
@@ -320,18 +302,18 @@ func (cluster *redisCluster) handleMove(node *redisNode, replyMsg, cmd string, a
 func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
     fields := strings.Split(replyMsg, " ")
     if len(fields) != 3 {
-	return nil, redisError(replyMsg)
+	return nil, errors.New(replyMsg)
     }
 
     newNode, ok := cluster.nodes[fields[2]]
     if !ok {
 	cluster.sendUpdateMesg(node)
-	return nil, redisError(replyMsg)
+	return nil, errors.New(replyMsg)
     }
 
     conn, err := newNode.getConn()
     if err != nil {
-	return nil, redisError(replyMsg)
+	return nil, errors.New(replyMsg)
     }
 
     conn.send("ASKING")
@@ -346,7 +328,7 @@ func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, ar
     re, err := String(conn.receive())
     if err != nil || re != "OK" {
 	conn.shutdown()
-	return nil, redisError(replyMsg)
+	return nil, errors.New(replyMsg)
     }
 
     reply, err := conn.receive()
@@ -399,13 +381,13 @@ func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args
     }
 
     if fields[2] == node.address {
-	return nil, fmt.Errorf("connection timeout")
+	return nil, errors.New("connection timeout")
     }
 
     newNode, ok := cluster.nodes[fields[2]]
     if !ok {
 	cluster.sendUpdateMesg(randomNode)
-	return nil, redisError(errMsg)
+	return nil, errors.New(errMsg)
     }
 
     reply, err = newNode.do(cmd, args...)
@@ -414,11 +396,7 @@ func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args
     return reply, err
 }
 
-func checkReply(reply interface{}, err error) int {
-    if err != nil {
-	return RESP_ERROR
-    }
-
+func checkReply(reply interface{}) int {
     if _, ok := reply.(redisError); !ok {
 	return RESP_OK
     }

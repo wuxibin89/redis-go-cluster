@@ -20,6 +20,7 @@ import (
     "sync"
     "time"
     "bufio"
+    "errors"
     "strconv"
     "container/list"
 )
@@ -176,7 +177,7 @@ func (conn *redisConn) receive() (interface{}, error) {
     }
 
     if conn.pending <= 0 {
-	return nil, fmt.Errorf("no more pending reply")
+	return nil, errors.New("no more pending reply")
     }
 
     conn.pending -= 1
@@ -295,7 +296,7 @@ func (conn *redisConn) readLine() ([]byte, error) {
 
 	n := len(p) - 2
 	if n < 0 {
-	    return nil, fmt.Errorf("invalid response")
+	    return nil, errors.New("invalid response")
 	}
 
 	// bulk string may contain '\n', such as CLUSTER NODES
@@ -319,7 +320,7 @@ func (conn *redisConn) readLine() ([]byte, error) {
 // parseLen parses bulk string and array length.
 func parseLen(p []byte) (int, error) {
     if len(p) == 0 {
-	return -1, fmt.Errorf("invalid response")
+	return -1, errors.New("invalid response")
     }
 
     // null element.
@@ -331,7 +332,7 @@ func parseLen(p []byte) (int, error) {
     for _, b := range p {
 	n *= 10
 	if b < '0' || b > '9' {
-		return -1, fmt.Errorf("invalid response")
+		return -1, errors.New("invalid response")
 	}
 	n += int(b - '0')
     }
@@ -342,7 +343,7 @@ func parseLen(p []byte) (int, error) {
 // parseInt parses an integer reply.
 func parseInt(p []byte) (int64, error) {
     if len(p) == 0 {
-	return 0, fmt.Errorf("invalid response")
+	return 0, errors.New("invalid response")
     }
 
     var negate bool
@@ -350,7 +351,7 @@ func parseInt(p []byte) (int64, error) {
 	negate = true
 	p = p[1:]
 	if len(p) == 0 {
-	    return 0, fmt.Errorf("invalid response")
+	    return 0, errors.New("invalid response")
 	}
     }
 
@@ -358,7 +359,7 @@ func parseInt(p []byte) (int64, error) {
     for _, b := range p {
 	n *= 10
 	if b < '0' || b > '9' {
-		return 0, fmt.Errorf("invalid response")
+		return 0, errors.New("invalid response")
 	}
 	n += int64(b - '0')
     }
@@ -384,7 +385,7 @@ func (conn *redisConn) readReply() (interface{}, error) {
 	return nil, err
     }
     if len(line) == 0 {
-	return nil, fmt.Errorf("invalid reponse")
+	return nil, errors.New("invalid reponse")
     }
 
     switch line[0] {
@@ -414,7 +415,7 @@ func (conn *redisConn) readReply() (interface{}, error) {
 	    return nil, err
 	}
 	if len(line) != n {
-	    return nil, fmt.Errorf("invalid response")
+	    return nil, errors.New("invalid response")
 	}
 
 	return line, nil
@@ -435,5 +436,5 @@ func (conn *redisConn) readReply() (interface{}, error) {
 	return r, nil
     }
 
-    return nil, fmt.Errorf("invalid response")
+    return nil, errors.New("invalid response")
 }
