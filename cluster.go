@@ -54,6 +54,8 @@ type nodeCommand struct {
 type nodeBatch struct {
     node    *redisNode
     cmds    []nodeCommand
+
+    err	    error
     done    chan int
 }
 
@@ -83,7 +85,7 @@ func (batch *redisBatch) Put(cmd string, args ...interface{}) error {
     }
 
     var i int
-    for i = range batch.batches {
+    for i = 0; i < len(batch.batches); i++ {
 	if batch.batches[i].node == node {
 	    batch.batches[i].cmds = append(batch.batches[i].cmds,
 		nodeCommand{cmd: cmd, args: args})
@@ -97,7 +99,7 @@ func (batch *redisBatch) Put(cmd string, args ...interface{}) error {
 	batch.batches = append(batch.batches,
 	    nodeBatch{
 		node: node,
-		cmds: []nodeCommand{{cmd, args, nil, nil}},
+		cmds: []nodeCommand{{cmd: cmd, args: args}},
 		done: make(chan int)})
 	batch.index = append(batch.index, i)
     }
@@ -120,12 +122,57 @@ func (cluster *redisCluster) RunBatch(batch Batch) (interface{}, error) {
 	go doBatch(bat.batches[i])
     }
 
-    return nil, nil
+    for i := range bat.batches {
+	<-bat.batches[i].done
+    }
+
+    var replies []interface{}
+    for _, i := range bat.index {
+	if bat.batches[i].err != nil {
+	    return nil, bat.batches[i].err
+	}
+
+	replies = append(replies, bat.batches[i].cmds[0].reply)
+	bat.batches[i].cmds = bat.batches[i].cmds[1:]
+    }
+
+    return replies, nil
 }
 
 func doBatch(batch nodeBatch) {
-    conn := batch.node.getConn()
-    if 
+    conn, err := batch.node.getConn()
+    if err != nil {
+	batch.err = err
+	batch.done <- 1
+	return
+    }
+
+    for i := range batch.cmds {
+	conn.send(batch.cmds[i].cmd, batch.cmds[i].args...)
+    }
+
+    err = conn.flush()
+    if err != nil {
+	batch.err = err
+	conn.shutdown()
+	batch.done <- 1
+	return
+    }
+
+    for i := range batch.cmds {
+	reply, err := conn.receive()
+	if err != nil {
+	    batch.err = err
+	    conn.shutdown()
+	    batch.done <- 1
+	    return
+	}
+
+	batch.cmds[i].reply, batch.cmds[i].err = reply, err
+    }
+
+    batch.node.releaseConn(conn)
+    batch.done <- 1
 }
 
 func NewCluster(options *Options) (Cluster, error) {
@@ -248,6 +295,7 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
     for i := 0; i < len(args); i += 2 {
 	key, err := toBytes(args[i])
 	if err != nil {
+	    cluster.rwLock.RUnlock()
 	    return nil, fmt.Errorf("invalid key %v", args[i])
 	}
 
@@ -266,6 +314,7 @@ func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interfac
 	if j == len(tasks) {
 	    node := cluster.slots[slot]
 	    if node == nil {
+		cluster.rwLock.RUnlock()
 		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
 	    }
 
@@ -307,6 +356,7 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
     for i := 0; i < len(args); i++ {
 	key, err := toBytes(args[i])
 	if err != nil {
+	    cluster.rwLock.RUnlock()
 	    return nil, fmt.Errorf("invalid key %v", args[i])
 	}
 
@@ -325,6 +375,7 @@ func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interfac
 	if j == len(tasks) {
 	    node := cluster.slots[slot]
 	    if node == nil {
+		cluster.rwLock.RUnlock()
 		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
 	    }
 
@@ -382,7 +433,10 @@ func (cluster *redisCluster) handleMove(node *redisNode, replyMsg, cmd string, a
 	return nil, errors.New(replyMsg)
     }
 
+    cluster.rwLock.RLock()
     newNode, ok := cluster.nodes[fields[2]]
+    cluster.rwLock.RUnlock()
+
     if !ok {
 	cluster.sendUpdateMesg(node)
 	return nil, errors.New(replyMsg)
@@ -400,7 +454,10 @@ func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, ar
 	return nil, errors.New(replyMsg)
     }
 
+    cluster.rwLock.RLock()
     newNode, ok := cluster.nodes[fields[2]]
+    cluster.rwLock.RUnlock()
+
     if !ok {
 	cluster.sendUpdateMesg(node)
 	return nil, errors.New(replyMsg)
@@ -441,11 +498,13 @@ func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args
     var randomNode *redisNode
 
     // choose a random node other than previous one
+    cluster.rwLock.RLock()
     for _, randomNode = range cluster.nodes {
 	if randomNode.address != node.address {
 	    break
 	}
     }
+    cluster.rwLock.RUnlock()
 
     reply, err := randomNode.do(cmd, args...)
     if err != nil {
@@ -479,7 +538,10 @@ func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args
 	return nil, errors.New("connection timeout")
     }
 
+    cluster.rwLock.RLock()
     newNode, ok := cluster.nodes[fields[2]]
+    cluster.rwLock.RUnlock()
+
     if !ok {
 	cluster.sendUpdateMesg(randomNode)
 	return nil, errors.New(errMsg)
@@ -610,9 +672,11 @@ func (cluster *redisCluster) updateClustrInfo(node *redisNode) error {
 	// TODO: ignore other nodes?
     }
 
-    // TODO: need sync primitive?
+    cluster.rwLock.Lock()
     cluster.slots = slots
     cluster.nodes = nodes
+    cluster.rwLock.Unlock()
+
     cluster.updateTime = time.Now()
 
     return nil
