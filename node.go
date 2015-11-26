@@ -1,3 +1,4 @@
+// Copyright 2015 Joel Wu
 // Copyright 2012 Gary Burd
 //
 // Licensed under the Apache License, Version 2.0 (the "License"): you may
@@ -51,7 +52,7 @@ type redisNode struct {
     // node address, ip:port
     address	string
 
-    slots	[CLUSTER_SLOTS/8]uint8
+    slots	[kClusterSlots/8]uint8
     numSlots	uint16
 
     slaves	[]*redisNode

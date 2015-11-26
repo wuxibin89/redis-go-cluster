@@ -10,13 +10,22 @@ import (
 )
 
 func main() {
-    cluster, err := redis.NewDefaultCluster([]string{"127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"})
+    cluster, err := redis.NewCluster(
+	&redis.Options{
+	    StartNodes: []string{"127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"},
+	    ConnTimeout: 50 * time.Millisecond,
+	    ReadTimeout: 50 * time.Millisecond,
+	    WriteTimeout: 50 * time.Millisecond,
+	    KeepAlive: 16,
+	    AliveTime: 60 * time.Second,
+	})
+
     if err != nil {
 	log.Fatalf("redis.New error: %s", err.Error())
     }
 
     prefix := "mykey"
-    for i := 0; i < 100000; i++ {
+    for i := 500000; i < 1000000; i++ {
 	key := prefix + strconv.Itoa(i)
 
 	_, err := cluster.Do("set", key, i*10)
@@ -37,6 +46,6 @@ func main() {
 	    continue
 	}
 	fmt.Printf("+set %s\n", key)
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
     }
 }
