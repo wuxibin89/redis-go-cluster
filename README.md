@@ -1,6 +1,9 @@
 # redis-go-cluster
 redis-go-cluster is a golang implementation of redis client based on Gary Burd's
-[Redigo](https://github.com/garyburd/redigo). 
+[Redigo](https://github.com/garyburd/redigo). It caches slot info at local and 
+updates it automatically when cluster change. The client manages a connection pool 
+for each node, uses goroutine to execute as concurrently as possible, which leads 
+to its high efficiency and low lantency.
 
 **Supported**:
 * Most commands of keys, strings, lists, sets, sorted sets, hashes.
