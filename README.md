@@ -18,7 +18,9 @@ to its high efficiency and low lantency.
 
 ## Installation
 Install redis-go-cluster with go tool:
+```
     go get github.com/chasex/redis-go-cluster
+```
     
 ## Usage
 To use redis cluster, you need import the package and create a new cluster client
