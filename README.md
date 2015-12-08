@@ -16,6 +16,9 @@ to its high efficiency and low lantency.
 * Transaction
 * Lua script
 
+### Documentation
+[API Reference](https://godoc.org/github.com/chasex/redis-go-cluster)
+
 ## Installation
 Install redis-go-cluster with go tool:
 ```
