@@ -189,7 +189,6 @@ func (conn *redisConn) receive() (interface{}, error) {
 func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) {
     conn, err := node.getConn()
     if err != nil {
-	conn.shutdown()
 	return redisError("ECONNTIMEOUT"), nil
     }
 

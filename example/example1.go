@@ -9,6 +9,8 @@ import (
     "github.com/chasex/redis-go-cluster"
 )
 
+const kNumOfRoutine = 50
+
 func main() {
     cluster, err := redis.NewCluster(
 	&redis.Options{
@@ -24,8 +26,19 @@ func main() {
 	log.Fatalf("redis.New error: %s", err.Error())
     }
 
+    chann := make(chan int, kNumOfRoutine)
+    for i := 0; i < kNumOfRoutine; i++ {
+	go redisTest(cluster, i * 100000, (i+1)*100000, chann)
+    }
+
+    for i := 0; i < kNumOfRoutine; i++ {
+	_ = <-chann
+    }
+}
+
+func redisTest(cluster redis.Cluster, begin, end int, done chan int) {
     prefix := "mykey"
-    for i := 500000; i < 1000000; i++ {
+    for i := begin; i < end; i++ {
 	key := prefix + strconv.Itoa(i)
 
 	_, err := cluster.Do("set", key, i*10)
@@ -48,4 +61,6 @@ func main() {
 	fmt.Printf("+set %s\n", key)
 	time.Sleep(10 * time.Millisecond)
     }
+
+    done <- 1
 }
