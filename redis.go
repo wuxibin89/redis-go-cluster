@@ -94,6 +94,9 @@ type Cluster interface {
     // RunBatch execute commands in batch simutaneously. If multiple commands are 
     // directed to the same node, they will be merged and sent at once using pipeling.
     RunBatch(batch Batch) ([]interface{}, error)
+
+    // Close cluster connection, any subsequent method call will fail.
+    Close()
 }
 
 // Batch pack multiple commands, which should be supported by Do method.

@@ -47,36 +47,29 @@ type redisConn struct {
 }
 
 type redisNode struct {
-    // node name, hex string, sha1-size
-    name	string
-    // node address, ip:port
-    address	string
+    address	    string
 
-    slots	[kClusterSlots/8]uint8
-    numSlots	uint16
+    slots	    [kClusterSlots/8]uint8
+    numSlots	    uint16
 
-    slaves	[]*redisNode
-    master	*redisNode
-
-    conns	list.List
-    keepAlive	int
-    aliveTime	time.Duration
+    conns	    list.List
+    keepAlive	    int
+    aliveTime	    time.Duration
 
     connTimeout	    time.Duration
     readTimeout	    time.Duration
     writeTimeout    time.Duration
 
-    mutex	sync.Mutex
+    mutex	    sync.Mutex
+
+    updateTime	    time.Time
+
+    closed	    bool
 }
 
 func (node *redisNode) setSlot(slot uint16) {
     node.slots[slot>>3] |= 1 << (slot & 0x07)
     node.numSlots++
-}
-
-func (node *redisNode) addSlave(slave *redisNode) {
-    node.slaves = append(node.slaves, slave)
-    slave.master = node
 }
 
 func (node *redisNode) getConn() (*redisConn, error) {
@@ -124,14 +117,14 @@ func (node *redisNode) getConn() (*redisConn, error) {
 }
 
 func (node *redisNode) releaseConn(conn *redisConn) {
+    node.mutex.Lock()
+    defer node.mutex.Unlock()
+
     // Connection still has pending replies, just close it.
-    if conn.pending > 0 {
+    if conn.pending > 0 || node.closed {
 	conn.shutdown()
 	return
     }
-
-    node.mutex.Lock()
-    defer node.mutex.Unlock()
 
     if node.conns.Len() >= node.keepAlive || node.aliveTime <= 0 {
 	conn.shutdown()
@@ -144,6 +137,24 @@ func (node *redisNode) releaseConn(conn *redisConn) {
 
 func (conn *redisConn) shutdown() {
     conn.c.Close()
+}
+
+func (node *redisNode) shutdown() {
+    node.mutex.Lock()
+    defer node.mutex.Unlock()
+
+    for {
+	elem := node.conns.Back()
+	if elem == nil {
+	    break
+	}
+
+	conn := elem.Value.(*redisConn)
+	conn.c.Close()
+	node.conns.Remove(elem)
+    }
+
+    node.closed = true
 }
 
 func (conn *redisConn) send(cmd string, args ...interface{}) error {

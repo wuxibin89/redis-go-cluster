@@ -54,6 +54,8 @@ type redisCluster struct {
     updateList	chan updateMesg
 
     rwLock	sync.RWMutex
+
+    closed	bool
 }
 
 type nodeCommand struct {
@@ -210,11 +212,11 @@ func newCluster(options *Options) (Cluster, error) {
 	    aliveTime: options.AliveTime,
 	}
 
-	err := cluster.updateClustrInfo(node)
+	err := cluster.update(node)
 	if err != nil {
 	    continue
 	} else {
-	    go cluster.handleUpdateMesg()
+	    go cluster.handleUpdate()
 	    return cluster, nil
 	}
     }
@@ -270,6 +272,13 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     }
 
     panic("unreachable")
+}
+
+func (cluster *redisCluster) Close() {
+    cluster.rwLock.Lock()
+    defer cluster.rwLock.Unlock()
+
+    cluster.closed = true
 }
 
 type multiTask struct {
@@ -435,19 +444,18 @@ func (cluster *redisCluster) handleMove(node *redisNode, replyMsg, cmd string, a
 	return nil, errors.New(replyMsg)
     }
 
+    // cluster change, inform back routine to update
+    cluster.inform(node)
+
     cluster.rwLock.RLock()
     newNode, ok := cluster.nodes[fields[2]]
     cluster.rwLock.RUnlock()
 
     if !ok {
-	cluster.sendUpdateMesg(node)
 	return nil, errors.New(replyMsg)
     }
 
-    reply, err := newNode.do(cmd, args...)
-    cluster.sendUpdateMesg(node)
-
-    return reply, err
+    return newNode.do(cmd, args...)
 }
 
 func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
@@ -461,7 +469,7 @@ func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, ar
     cluster.rwLock.RUnlock()
 
     if !ok {
-	cluster.sendUpdateMesg(node)
+	cluster.inform(node)
 	return nil, errors.New(replyMsg)
     }
 
@@ -540,19 +548,18 @@ func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args
 	return nil, errors.New("connection timeout")
     }
 
+    // cluster change, inform back routine to update
+    cluster.inform(randomNode)
+
     cluster.rwLock.RLock()
     newNode, ok := cluster.nodes[fields[2]]
     cluster.rwLock.RUnlock()
 
     if !ok {
-	cluster.sendUpdateMesg(randomNode)
 	return nil, errors.New(errMsg)
     }
 
-    reply, err = newNode.do(cmd, args...)
-    cluster.sendUpdateMesg(randomNode)
-
-    return reply, err
+    return newNode.do(cmd, args...)
 }
 
 func checkReply(reply interface{}) int {
@@ -606,130 +613,115 @@ const (
     kFieldSlot
 )
 
-func (cluster *redisCluster) updateClustrInfo(node *redisNode) error {
-    info, err := String(node.do("CLUSTER", "NODES"))
+func (cluster *redisCluster) update(node *redisNode) error {
+    info, err := Values(node.do("CLUSTER", "SLOTS"))
     if err != nil {
 	return err
     }
 
-    infos := strings.Split(strings.Trim(info, "\n"), "\n")
-    fields := make([][]string, len(infos))
+    errFormat := fmt.Errorf("update: %s invalid response", node.address)
 
-    // create brand new slots info and nodes info
-    slots := make([]*redisNode, kClusterSlots)
-    nodes := make(map[string]*redisNode)
+    var nslots int
+    var slots map[string][]uint16
 
-    for i := range fields {
-	fields[i] = strings.Split(infos[i], " ")
-	if len(fields[i]) < kFieldSlot {
-	    return fmt.Errorf("missing field: %s [%d] [%d]", infos[i], len(fields[i]), kFieldSlot)
+    for i := range info {
+	m, err := Values(i, err)
+	if len(m) < 3 {
+	    return errFormat
 	}
 
-	nodes[fields[i][kFieldAddr]] = &redisNode {
-	    name: fields[i][kFieldName],
-	    address: fields[i][kFieldAddr],
-	    slaves: make([]*redisNode, 0),
-	    connTimeout: cluster.connTimeout,
-	    readTimeout: cluster.readTimeout,
-	    writeTimeout: cluster.writeTimeout,
-	    keepAlive: cluster.keepAlive,
-	    aliveTime: cluster.aliveTime,
+	start, err := Int(m[0], err)
+	if err != nil {
+	    return errFormat
 	}
+
+	end, err := Int(m[1], err)
+	if err != nil {
+	    return errFormat
+	}
+
+	s, err := Strings(m[2], err)
+	if err != nil || len(s) != 2 {
+	    return errFormat
+	}
+	addr := s[0] + ":" + s[1]
+
+	slot, ok := slots[addr]
+	if !ok {
+	    slot = make([]uint16, 2)
+	}
+
+	nslots += end - start + 1
+
+	slot = append(slot, uint16(start))
+	slot = append(slot , uint16(end))
+
+	slots[addr] = slot
     }
 
-    for i := range fields {
-	// ignore disconnected nodes
-	if fields[i][kFieldState] == "disconnected" {
-	    continue
-	}
-
-	// handle master node
-	if fields[i][kFieldFlag] == "master" || fields[i][kFieldFlag] == "myself,master" {
-	    for j := range fields[i][kFieldSlot:] {
-		// ignore additional importing and migrating slots
-		if strings.IndexByte(fields[i][kFieldSlot+j], '[') != -1 {
-		    break
-		}
-
-		if err := setSlot(slots, nodes, fields[i][kFieldAddr],
-		    fields[i][kFieldSlot+j]); err != nil {
-		    return err
-		}
-	    }
-	    continue
-	}
-
-	// handle slave node
-	if fields[i][kFieldFlag] == "slave" || fields[i][kFieldFlag] == "myself,slave" {
-	    slave := nodes[fields[i][kFieldAddr]]
-	    for _, v := range nodes {
-	        if v.name == fields[i][kFieldName] {
-		    v.addSlave(slave)
-		    break
-	        }
-	    }
-	    continue
-	}
-
-	// TODO: ignore other nodes?
+    // TODO: Is full coverage really needed?
+    if nslots != kClusterSlots {
+	return fmt.Errorf("update: %s slots not full covered", node.address)
     }
 
     cluster.rwLock.Lock()
-    cluster.slots = slots
-    cluster.nodes = nodes
-    cluster.rwLock.Unlock()
+    defer cluster.rwLock.Unlock()
 
-    cluster.updateTime = time.Now()
+    t := time.Now()
 
-    return nil
-}
-
-func setSlot(slots []*redisNode, nodes map[string]*redisNode, address, field string) error {
-
-    node := nodes[address]
-    n := strings.IndexByte(field, '-')
-
-    // single slot
-    if n == -1 {
-	slot, err := strconv.ParseUint(field, 10, 16)
-	if err != nil {
-	    return err
+    for addr, slot := range slots {
+	node, ok := cluster.nodes[addr]
+	if !ok {
+	    node = &redisNode {
+		address: addr,
+		connTimeout: cluster.connTimeout,
+		readTimeout: cluster.readTimeout,
+		writeTimeout: cluster.writeTimeout,
+		keepAlive: cluster.keepAlive,
+		aliveTime: cluster.aliveTime,
+	    }
+	} else {
+	    // reset slots
+	    for i := 0; i < kClusterSlots; i++ {
+		node.slots[i] = 0
+	    }
+	    node.numSlots = 0
 	}
-	node.setSlot(uint16(slot))
-	slots[slot] = node
 
-	return nil
+	n := len(slot)
+	for i := 0; i < n - 1; i += 2 {
+	    start := slot[i]
+	    end := slot[i+1]
+
+	    for j := start; j <= end; j++ {
+		node.setSlot(j)
+	    }
+	}
+
+	node.updateTime = t
     }
 
-    // range slots
-    startSlot, err := strconv.ParseUint(field[:n], 10, 16)
-    if err != nil {
-	return err
-    }
-    endSlot, err := strconv.ParseUint(field[n+1:], 10, 16)
-    if err != nil {
-	return err
-    }
-
-    for slot := startSlot; slot <= endSlot; slot++ {
-	node.setSlot(uint16(slot))
-	slots[slot] = node
+    // shrink
+    for _, node := range cluster.nodes {
+	if node.updateTime != t {
+	    node.shutdown()
+	}
     }
 
     return nil
 }
 
-func (cluster *redisCluster) handleUpdateMesg() {
+func (cluster *redisCluster) handleUpdate() {
     for {
 	msg := <-cluster.updateList
-	err := cluster.updateClustrInfo(msg.node)
+	err := cluster.update(msg.node)
 	if err != nil {
 	    log.Printf("update cluster info error: %s\n", err.Error())
 	}
     }
 }
 
-func (cluster *redisCluster) sendUpdateMesg(node *redisNode) {
+func (cluster *redisCluster) inform(node *redisNode) {
     mesg := updateMesg{
 	node: node,
 	movedTime: time.Now(),
