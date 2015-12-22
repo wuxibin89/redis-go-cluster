@@ -412,6 +412,8 @@ func convertAssign(d interface{}, s interface{}) (err error) {
 	    *d = string(s)
 	case *int:
 	    *d, err = strconv.Atoi(string(s))
+	case *int64:
+	    *d, err = strconv.ParseInt(string(s), 10, 64)
 	case *bool:
 	    *d, err = strconv.ParseBool(string(s))
 	case *[]byte:
@@ -436,6 +438,8 @@ func convertAssign(d interface{}, s interface{}) (err error) {
 		x = 0
 	    }
 	    *d = x
+	case *int64:
+	    *d = s
 	case *bool:
 	    *d = s != 0
 	case *interface{}:
