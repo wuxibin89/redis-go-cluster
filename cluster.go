@@ -21,179 +21,51 @@ import (
     "sync"
     "strings"
     "strconv"
-    "errors"
 )
 
-const (
-    kClusterSlots	= 16384
+// Options is used to initialize a new redis cluster.
+type Options struct {
+    StartNodes	    []string	    // Startup nodes
 
-    kRespOK		= 0
-    kRespMove		= 1
-    kRespAsk		= 2
-    kRespConnTimeout	= 3
-    kRespError		= 4
-)
+    ConnTimeout	    time.Duration   // Connection timeout
+    ReadTimeout	    time.Duration   // Read timeout
+    WriteTimeout    time.Duration   // Write timeout
+
+    KeepAlive	    int		    // Maximum keep alive connecion in each node
+    AliveTime	    time.Duration   // Keep alive timeout
+}
+
+// Cluster is a redis client that manage connections to redis nodes, 
+// cache and update cluster info, and execute all kinds of commands.
+// Multiple goroutines may invoke methods on a cluster simutaneously.
+type Cluster struct {
+    slots	    [kClusterSlots]*redisNode
+    nodes	    map[string]*redisNode
+
+    connTimeout	    time.Duration
+    readTimeout	    time.Duration
+    writeTimeout    time.Duration
+
+    keepAlive	    int
+    aliveTime	    time.Duration
+
+    updateTime	    time.Time
+    updateList	    chan updateMesg
+
+    rwLock	    sync.RWMutex
+
+    closed	    bool
+}
 
 type updateMesg struct {
-    node*	redisNode
-    movedTime	time.Time
+    node*	    redisNode
+    movedTime	    time.Time
 }
 
-type redisCluster struct {
-    slots	[]*redisNode
-    nodes	map[string]*redisNode
-
-    connTimeout time.Duration
-    readTimeout time.Duration
-    writeTimeout time.Duration
-
-    keepAlive	int
-    aliveTime	time.Duration
-
-    updateTime	time.Time
-    updateList	chan updateMesg
-
-    rwLock	sync.RWMutex
-
-    closed	bool
-}
-
-type nodeCommand struct {
-    cmd	    string
-    args    []interface{}
-    reply   interface{}
-    err	    error
-}
-
-type nodeBatch struct {
-    node    *redisNode
-    cmds    []nodeCommand
-
-    err	    error
-    done    chan int
-}
-
-type redisBatch struct {
-    cluster	*redisCluster
-    batches	[]nodeBatch
-    index	[]int
-}
-
-// Put implement the Batch Put method.
-func (batch *redisBatch) Put(cmd string, args ...interface{}) error {
-    if len(args) < 1 {
-	return errors.New("no key found in args")
-    }
-
-    key, err := toBytes(args[0])
-    if err != nil {
-	return err
-    }
-
-    slot := hashSlot(key)
-    batch.cluster.rwLock.RLock()
-    node := batch.cluster.slots[slot]
-    batch.cluster.rwLock.RUnlock()
-
-    if node == nil {
-	return fmt.Errorf("no node serve slot %d for key %s", slot, key)
-    }
-
-    var i int
-    for i = 0; i < len(batch.batches); i++ {
-	if batch.batches[i].node == node {
-	    batch.batches[i].cmds = append(batch.batches[i].cmds,
-		nodeCommand{cmd: cmd, args: args})
-
-	    batch.index = append(batch.index, i)
-	    break
-	}
-    }
-
-    if i == len(batch.batches) {
-	batch.batches = append(batch.batches,
-	    nodeBatch{
-		node: node,
-		cmds: []nodeCommand{{cmd: cmd, args: args}},
-		done: make(chan int)})
-	batch.index = append(batch.index, i)
-    }
-
-    return nil
-}
-
-// NewBatch implement the Cluster NewBatch method.
-func (cluster *redisCluster) NewBatch() Batch {
-    return &redisBatch{
-	cluster: cluster,
-	batches: make([]nodeBatch, 0),
-	index: make([]int, 0),
-    }
-}
-
-// RunBatch implement the Cluster RunBatch method.
-func (cluster *redisCluster) RunBatch(batch Batch) ([]interface{}, error) {
-    bat := batch.(*redisBatch)
-
-    for i := range bat.batches {
-	go doBatch(bat.batches[i])
-    }
-
-    for i := range bat.batches {
-	<-bat.batches[i].done
-    }
-
-    var replies []interface{}
-    for _, i := range bat.index {
-	if bat.batches[i].err != nil {
-	    return nil, bat.batches[i].err
-	}
-
-	replies = append(replies, bat.batches[i].cmds[0].reply)
-	bat.batches[i].cmds = bat.batches[i].cmds[1:]
-    }
-
-    return replies, nil
-}
-
-func doBatch(batch nodeBatch) {
-    conn, err := batch.node.getConn()
-    if err != nil {
-	batch.err = err
-	batch.done <- 1
-	return
-    }
-
-    for i := range batch.cmds {
-	conn.send(batch.cmds[i].cmd, batch.cmds[i].args...)
-    }
-
-    err = conn.flush()
-    if err != nil {
-	batch.err = err
-	conn.shutdown()
-	batch.done <- 1
-	return
-    }
-
-    for i := range batch.cmds {
-	reply, err := conn.receive()
-	if err != nil {
-	    batch.err = err
-	    conn.shutdown()
-	    batch.done <- 1
-	    return
-	}
-
-	batch.cmds[i].reply, batch.cmds[i].err = reply, err
-    }
-
-    batch.node.releaseConn(conn)
-    batch.done <- 1
-}
-
-func newCluster(options *Options) (Cluster, error) {
-    cluster := &redisCluster{
+// NewCluster create a new redis cluster client with specified options.
+func NewCluster(options *Options) (*Cluster, error) {
+    cluster := &Cluster{
+	nodes: make(map[string]*redisNode),
 	connTimeout: options.ConnTimeout,
 	readTimeout: options.ReadTimeout,
 	writeTimeout: options.WriteTimeout,
@@ -221,13 +93,25 @@ func newCluster(options *Options) (Cluster, error) {
 	}
     }
 
-    return nil, fmt.Errorf("no invalid node in %v", options.StartNodes)
+    return nil, fmt.Errorf("NewCluster: no invalid node in %v", options.StartNodes)
 }
 
-// Do implement the Cluster Do method.
-func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, error) {
+// Do excute a redis command with random number arguments. First argument will
+// be used as key to hash to a slot, so it only supports a subset of redis 
+// commands.
+///
+// SUPPORTED: most commands of keys, strings, lists, sets, sorted sets, hashes.
+// NOT SUPPORTED: scripts, transactions, clusters.
+// 
+// Particularly, MSET/MSETNX/MGET are supported using result aggregation. 
+// To MSET/MSETNX, there's no atomicity gurantee that given keys are set at once.
+// It's possible that some keys are set, while others not.
+//
+// See README.md for more details.
+// See full redis command list: http://www.redis.io/commands
+func (cluster *Cluster) Do(cmd string, args ...interface{}) (interface{}, error) {
     if len(args) < 1 {
-	return nil, fmt.Errorf("no key found in args")
+	return nil, fmt.Errorf("Do: no key found in args")
     }
 
     if cmd == "MSET" || cmd == "MSETNX" {
@@ -238,31 +122,21 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
 	return cluster.multiGet(cmd, args...)
     }
 
-    key, err := toBytes(args[0])
+    node, err := cluster.getNodeByKey(args[0])
     if err != nil {
-	return nil, fmt.Errorf("invalid key %v", args[0])
-    }
-
-    slot := hashSlot(key)
-
-    cluster.rwLock.RLock()
-    node := cluster.slots[slot]
-    cluster.rwLock.RUnlock()
-
-    if node == nil {
-	return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
+	return nil, fmt.Errorf("Do: %v", err)
     }
 
     reply, err := node.do(cmd, args...)
     if err != nil {
-	return reply, err
+	return nil, fmt.Errorf("Do: %v", err)
     }
 
     resp := checkReply(reply)
 
     switch(resp) {
     case kRespOK, kRespError:
-	return reply, err
+	return reply, nil
     case kRespMove:
 	return cluster.handleMove(node, reply.(redisError).Error(), cmd, args)
     case kRespAsk:
@@ -274,208 +148,50 @@ func (cluster *redisCluster) Do(cmd string, args ...interface{}) (interface{}, e
     panic("unreachable")
 }
 
-func (cluster *redisCluster) Close() {
+// Close cluster connection, any subsequent method call will fail.
+func (cluster *Cluster) Close() {
     cluster.rwLock.Lock()
     defer cluster.rwLock.Unlock()
+
+    for addr, node := range cluster.nodes {
+	node.shutdown()
+	delete(cluster.nodes, addr)
+    }
 
     cluster.closed = true
 }
 
-type multiTask struct {
-    node    *redisNode
-    slot    uint16
-
-    cmd	    string
-    args    []interface{}
-
-    reply   interface{}
-    replies []interface{}
-    err	    error
-
-    done    chan int
-}
-
-func (cluster *redisCluster) multiSet(cmd string, args ...interface{}) (interface{}, error) {
-    if len(args) & 1 != 0 {
-	return nil, fmt.Errorf("invalid args %v", args)
-    }
-
-    tasks := make([]*multiTask, 0)
-
-    cluster.rwLock.RLock()
-    for i := 0; i < len(args); i += 2 {
-	key, err := toBytes(args[i])
-	if err != nil {
-	    cluster.rwLock.RUnlock()
-	    return nil, fmt.Errorf("invalid key %v", args[i])
-	}
-
-	slot := hashSlot(key)
-
-	var j int
-	for j = 0; j < len(tasks); j++ {
-	    if tasks[j].slot == slot {
-		tasks[j].args = append(tasks[j].args, args[i])	    // key
-		tasks[j].args = append(tasks[j].args, args[i+1])    // value
-
-		break
-	    }
-	}
-
-	if j == len(tasks) {
-	    node := cluster.slots[slot]
-	    if node == nil {
-		cluster.rwLock.RUnlock()
-		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
-	    }
-
-	    task := &multiTask{
-		node: node,
-		slot: slot,
-		cmd: cmd,
-		args: []interface{}{args[i], args[i+1]},
-		done: make(chan int),
-	    }
-	    tasks = append(tasks, task)
-	}
-    }
-    cluster.rwLock.RUnlock()
-
-    for i := range tasks {
-	go handleSetTask(tasks[i])
-    }
-
-    for i := range tasks {
-	<-tasks[i].done
-    }
-
-    for i := range tasks {
-	_, err := String(tasks[i].reply, tasks[i].err)
-	if err != nil {
-	    return nil, err
-	}
-    }
-
-    return "OK", nil
-}
-
-func (cluster *redisCluster) multiGet(cmd string, args ...interface{}) (interface{}, error) {
-    tasks := make([]*multiTask, 0)
-    index := make([]*multiTask, len(args))
-
-    cluster.rwLock.RLock()
-    for i := 0; i < len(args); i++ {
-	key, err := toBytes(args[i])
-	if err != nil {
-	    cluster.rwLock.RUnlock()
-	    return nil, fmt.Errorf("invalid key %v", args[i])
-	}
-
-	slot := hashSlot(key)
-
-	var j int
-	for j = 0; j < len(tasks); j++ {
-	    if tasks[j].slot == slot {
-		tasks[j].args = append(tasks[j].args, args[i])	    // key
-		index[i] = tasks[j]
-
-		break
-	    }
-	}
-
-	if j == len(tasks) {
-	    node := cluster.slots[slot]
-	    if node == nil {
-		cluster.rwLock.RUnlock()
-		return nil, fmt.Errorf("no node serve slot %d for key %s", slot, key)
-	    }
-
-	    task := &multiTask{
-		node: node,
-		slot: slot,
-		cmd: cmd,
-		args: []interface{}{args[i]},
-		done: make(chan int),
-	    }
-	    tasks = append(tasks, task)
-	    index[i] = tasks[j]
-	}
-    }
-    cluster.rwLock.RUnlock()
-
-    for i := range tasks {
-	go handleGetTask(tasks[i])
-    }
-
-    for i := range tasks {
-	<-tasks[i].done
-    }
-
-    reply := make([]interface{}, len(args))
-    for i := range reply {
-	if index[i].err != nil {
-	    return nil, index[i].err
-	}
-
-	if len(index[i].replies) < 0 {
-	    panic("unreachable")
-	}
-
-	reply[i] = index[i].replies[0]
-	index[i].replies = index[i].replies[1:]
-    }
-
-    return reply, nil
-}
-
-func handleSetTask(task *multiTask) {
-    task.reply, task.err = task.node.do(task.cmd, task.args...)
-    task.done <- 1
-}
-
-func handleGetTask(task *multiTask) {
-    task.replies, task.err = Values(task.node.do(task.cmd, task.args...))
-    task.done <- 1
-}
-
-func (cluster *redisCluster) handleMove(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
+func (cluster *Cluster) handleMove(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
     fields := strings.Split(replyMsg, " ")
     if len(fields) != 3 {
-	return nil, errors.New(replyMsg)
+	return nil, fmt.Errorf("handleMove: invalid response \"%s\"", replyMsg)
     }
 
-    // cluster change, inform back routine to update
+    // cluster has changed, inform update routine
     cluster.inform(node)
 
-    cluster.rwLock.RLock()
-    newNode, ok := cluster.nodes[fields[2]]
-    cluster.rwLock.RUnlock()
-
-    if !ok {
-	return nil, errors.New(replyMsg)
+    newNode, err := cluster.getNodeByAddr(fields[2])
+    if err != nil {
+	return nil, fmt.Errorf("handleMove: %v", err)
     }
 
     return newNode.do(cmd, args...)
 }
 
-func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
+func (cluster *Cluster) handleAsk(node *redisNode, replyMsg, cmd string, args []interface{}) (interface{}, error) {
     fields := strings.Split(replyMsg, " ")
     if len(fields) != 3 {
-	return nil, errors.New(replyMsg)
+	return nil, fmt.Errorf("handleAsk: invalid response \"%s\"", replyMsg)
     }
 
-    cluster.rwLock.RLock()
-    newNode, ok := cluster.nodes[fields[2]]
-    cluster.rwLock.RUnlock()
-
-    if !ok {
-	cluster.inform(node)
-	return nil, errors.New(replyMsg)
+    newNode, err := cluster.getNodeByAddr(fields[2])
+    if err != nil {
+	return nil, fmt.Errorf("handleAsk: %v", err)
     }
 
     conn, err := newNode.getConn()
     if err != nil {
-	return nil, errors.New(replyMsg)
+	return nil, fmt.Errorf("handleAsk: %v", err)
     }
 
     conn.send("ASKING")
@@ -484,27 +200,27 @@ func (cluster *redisCluster) handleAsk(node *redisNode, replyMsg, cmd string, ar
     err = conn.flush()
     if err != nil {
 	conn.shutdown()
-	return nil, err
+	return nil, fmt.Errorf("handleAsk: %v", err)
     }
 
     re, err := String(conn.receive())
     if err != nil || re != "OK" {
 	conn.shutdown()
-	return nil, errors.New(replyMsg)
+	return nil, fmt.Errorf("handleAsk: %v", err)
     }
 
     reply, err := conn.receive()
     if err != nil {
 	conn.shutdown()
-	return nil, err
+	return nil, fmt.Errorf("handleAsk: %v", err)
     }
 
-    node.releaseConn(conn)
+    newNode.releaseConn(conn)
 
-    return reply, err
+    return reply, nil
 }
 
-func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args []interface{}) (interface{}, error) {
+func (cluster *Cluster) handleConnTimeout(node *redisNode, cmd string, args []interface{}) (interface{}, error) {
     var randomNode *redisNode
 
     // choose a random node other than previous one
@@ -518,17 +234,20 @@ func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args
 
     reply, err := randomNode.do(cmd, args...)
     if err != nil {
-	return reply, err
+	return nil, fmt.Errorf("handleConnTimeout: %v", err)
     }
 
     if _, ok := reply.(redisError); !ok {
-	return reply, err
+	// we happen to choose the right node, which means 
+	// that cluster has changed, so inform update routine.
+	cluster.inform(randomNode)
+	return reply, nil
     }
 
     // ignore replies other than MOVED
     errMsg := reply.(redisError).Error()
     if len(errMsg) < 5 || string(errMsg[:5]) != "MOVED" {
-	return reply, err
+	return reply, nil
     }
 
     // When MOVED received, we check wether move adress equal to 
@@ -541,26 +260,33 @@ func (cluster *redisCluster) handleConnTimeout(node *redisNode, cmd string, args
     // command, will this be a problem?
     fields := strings.Split(errMsg, " ")
     if len(fields) != 3 {
-	return reply, err
+	return nil, fmt.Errorf("handleConnTimeout: invalid response \"%s\"", errMsg)
     }
 
     if fields[2] == node.address {
-	return nil, errors.New("connection timeout")
+	return nil, fmt.Errorf("handleConnTimeout: %s connection timeout", node.address)
     }
 
     // cluster change, inform back routine to update
     cluster.inform(randomNode)
 
-    cluster.rwLock.RLock()
-    newNode, ok := cluster.nodes[fields[2]]
-    cluster.rwLock.RUnlock()
-
-    if !ok {
-	return nil, errors.New(errMsg)
+    newNode, err := cluster.getNodeByAddr(fields[2])
+    if err != nil {
+	return nil, fmt.Errorf("handleConnTimeout: %v", err)
     }
 
     return newNode.do(cmd, args...)
 }
+
+const (
+    kClusterSlots	= 16384
+
+    kRespOK		= 0
+    kRespMove		= 1
+    kRespAsk		= 2
+    kRespConnTimeout	= 3
+    kRespError		= 4
+)
 
 func checkReply(reply interface{}) int {
     if _, ok := reply.(redisError); !ok {
@@ -584,36 +310,7 @@ func checkReply(reply interface{}) int {
     return kRespError
 }
 
-func toBytes(arg interface{}) (string, error) {
-    switch arg := arg.(type) {
-    case int:
-	return strconv.Itoa(arg), nil
-    case int64:
-	return strconv.Itoa(int(arg)), nil
-    case float64:
-	return strconv.FormatFloat(arg, 'g', -1, 64), nil
-    case string:
-	return arg, nil
-    case []byte:
-	return string(arg), nil
-    default:
-	return "", fmt.Errorf("unknown type %T", arg)
-    }
-}
-
-const (
-    kFieldName = iota
-    kFieldAddr
-    kFieldFlag
-    kFieldMaster
-    kFieldPing
-    kFieldPong
-    kFieldEpoch
-    kFieldState
-    kFieldSlot
-)
-
-func (cluster *redisCluster) update(node *redisNode) error {
+func (cluster *Cluster) update(node *redisNode) error {
     info, err := Values(node.do("CLUSTER", "SLOTS"))
     if err != nil {
 	return err
@@ -622,11 +319,11 @@ func (cluster *redisCluster) update(node *redisNode) error {
     errFormat := fmt.Errorf("update: %s invalid response", node.address)
 
     var nslots int
-    var slots map[string][]uint16
+    slots := make(map[string][]uint16)
 
-    for i := range info {
+    for _, i := range info {
 	m, err := Values(i, err)
-	if len(m) < 3 {
+	if err != nil || len(m) < 3 {
 	    return errFormat
 	}
 
@@ -640,11 +337,19 @@ func (cluster *redisCluster) update(node *redisNode) error {
 	    return errFormat
 	}
 
-	s, err := Strings(m[2], err)
-	if err != nil || len(s) != 2 {
+	t, err := Values(m[2], err)
+	if err != nil || len(t) != 2 {
 	    return errFormat
 	}
-	addr := s[0] + ":" + s[1]
+
+	var ip string
+	var port int
+
+	_, err = Scan(t, &ip, &port)
+	if err != nil {
+	    return errFormat
+	}
+	addr := fmt.Sprintf("%s:%d", ip, port)
 
 	slot, ok := slots[addr]
 	if !ok {
@@ -668,6 +373,7 @@ func (cluster *redisCluster) update(node *redisNode) error {
     defer cluster.rwLock.Unlock()
 
     t := time.Now()
+    cluster.updateTime = t
 
     for addr, slot := range slots {
 	node, ok := cluster.nodes[addr]
@@ -680,12 +386,6 @@ func (cluster *redisCluster) update(node *redisNode) error {
 		keepAlive: cluster.keepAlive,
 		aliveTime: cluster.aliveTime,
 	    }
-	} else {
-	    // reset slots
-	    for i := 0; i < kClusterSlots; i++ {
-		node.slots[i] = 0
-	    }
-	    node.numSlots = 0
 	}
 
 	n := len(slot)
@@ -694,35 +394,41 @@ func (cluster *redisCluster) update(node *redisNode) error {
 	    end := slot[i+1]
 
 	    for j := start; j <= end; j++ {
-		node.setSlot(j)
+		cluster.slots[j] = node
 	    }
 	}
 
 	node.updateTime = t
+	cluster.nodes[addr] = node
     }
 
     // shrink
-    for _, node := range cluster.nodes {
+    for addr, node := range cluster.nodes {
 	if node.updateTime != t {
 	    node.shutdown()
+
+	    delete(cluster.nodes, addr)
 	}
     }
 
     return nil
 }
 
-func (cluster *redisCluster) handleUpdate() {
+func (cluster *Cluster) handleUpdate() {
     for {
 	msg := <-cluster.updateList
+
+	// TODO: control update frequency by updateTime and movedTime?
+
 	err := cluster.update(msg.node)
 	if err != nil {
-	    log.Printf("update cluster info error: %s\n", err.Error())
+	    log.Printf("handleUpdate: %v\n", err)
 	}
     }
 }
 
-func (cluster *redisCluster) inform(node *redisNode) {
-    mesg := updateMesg{
+func (cluster *Cluster) inform(node *redisNode) {
+    mesg := updateMesg {
 	node: node,
 	movedTime: time.Now(),
     }
@@ -735,7 +441,63 @@ func (cluster *redisCluster) inform(node *redisNode) {
     }
 }
 
-func hashSlot(key string) uint16 {
+func (cluster *Cluster) getNodeByAddr(addr string) (*redisNode, error) {
+    cluster.rwLock.RLock()
+    defer cluster.rwLock.RUnlock()
+
+    if cluster.closed {
+	return nil, fmt.Errorf("getNodeByAddr: cluster has been closed")
+    }
+
+    node, ok := cluster.nodes[addr]
+    if !ok {
+	return nil, fmt.Errorf("getNodeByAddr: %s not found", addr)
+    }
+
+    return node, nil
+}
+
+func (cluster *Cluster) getNodeByKey(arg interface{}) (*redisNode, error) {
+    key, err := key(arg)
+    if err != nil {
+	return nil, fmt.Errorf("getNodeByKey: invalid key %v", key)
+    }
+
+    slot := hash(key)
+
+    cluster.rwLock.RLock()
+    defer cluster.rwLock.RUnlock()
+
+    if cluster.closed {
+	return nil, fmt.Errorf("getNodeByKey: cluster has been closed")
+    }
+
+    node := cluster.slots[slot]
+    if node == nil {
+	return nil, fmt.Errorf("getNodeByKey: %s[%d] no node found", key, slot)
+    }
+
+    return node, nil
+}
+
+func key(arg interface{}) (string, error) {
+    switch arg := arg.(type) {
+    case int:
+	return strconv.Itoa(arg), nil
+    case int64:
+	return strconv.Itoa(int(arg)), nil
+    case float64:
+	return strconv.FormatFloat(arg, 'g', -1, 64), nil
+    case string:
+	return arg, nil
+    case []byte:
+	return string(arg), nil
+    default:
+	return "", fmt.Errorf("key: unknown type %T", arg)
+    }
+}
+
+func hash(key string) uint16 {
     var s, e int
     for s = 0; s < len(key); s++ {
 	if key[s] == '{' {

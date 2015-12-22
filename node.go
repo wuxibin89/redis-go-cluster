@@ -49,9 +49,6 @@ type redisConn struct {
 type redisNode struct {
     address	    string
 
-    slots	    [kClusterSlots/8]uint8
-    numSlots	    uint16
-
     conns	    list.List
     keepAlive	    int
     aliveTime	    time.Duration
@@ -67,13 +64,13 @@ type redisNode struct {
     closed	    bool
 }
 
-func (node *redisNode) setSlot(slot uint16) {
-    node.slots[slot>>3] |= 1 << (slot & 0x07)
-    node.numSlots++
-}
-
 func (node *redisNode) getConn() (*redisConn, error) {
     node.mutex.Lock()
+
+    if node.closed {
+	node.mutex.Unlock()
+	return nil, fmt.Errorf("getConn: connection has been closed")
+    }
 
     // remove stale connections
     if node.connTimeout > 0 {
@@ -83,7 +80,7 @@ func (node *redisNode) getConn() (*redisConn, error) {
 		break
 	    }
 	    conn := elem.Value.(*redisConn)
-	    if conn.t.Add(node.connTimeout).After(time.Now()) {
+	    if conn.t.Add(node.aliveTime).After(time.Now()) {
 		break
 	    }
 	    node.conns.Remove(elem)
@@ -129,6 +126,10 @@ func (node *redisNode) releaseConn(conn *redisConn) {
     if node.conns.Len() >= node.keepAlive || node.aliveTime <= 0 {
 	conn.shutdown()
 	return
+    }
+
+    if conn.c.RemoteAddr().String() != node.address {
+	panic("unreachable")
     }
 
     conn.t = time.Now()

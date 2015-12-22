@@ -14,7 +14,7 @@ const kNumOfRoutine = 50
 func main() {
     cluster, err := redis.NewCluster(
 	&redis.Options{
-	    StartNodes: []string{"127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"},
+	    StartNodes: []string{"10.168.66.193:7001", "10.168.66.193:7000", "10.168.66.187:7002"},
 	    ConnTimeout: 50 * time.Millisecond,
 	    ReadTimeout: 50 * time.Millisecond,
 	    WriteTimeout: 50 * time.Millisecond,
@@ -36,7 +36,7 @@ func main() {
     }
 }
 
-func redisTest(cluster redis.Cluster, begin, end int, done chan int) {
+func redisTest(cluster *redis.Cluster, begin, end int, done chan int) {
     prefix := "mykey"
     for i := begin; i < end; i++ {
 	key := prefix + strconv.Itoa(i)
@@ -59,7 +59,7 @@ func redisTest(cluster redis.Cluster, begin, end int, done chan int) {
 	    continue
 	}
 	fmt.Printf("+set %s\n", key)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
     }
 
     done <- 1

@@ -41,4 +41,11 @@ func main() {
     }
 
     fmt.Printf("name: %s, age: %d, country: %s\n", name, age, country)
+
+    cluster.Close()
+    _, err = cluster.Do("set", "foo", "bar")
+    if err == nil {
+	log.Fatal("expect a none nil error")
+    }
+    log.Println(err)
 }
