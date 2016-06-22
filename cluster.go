@@ -93,7 +93,7 @@ func NewCluster(options *Options) (*Cluster, error) {
 	}
     }
 
-    return nil, fmt.Errorf("NewCluster: no invalid node in %v", options.StartNodes)
+    return nil, fmt.Errorf("NewCluster: no valid node in %v", options.StartNodes)
 }
 
 // Do excute a redis command with random number arguments. First argument will
