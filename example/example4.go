@@ -82,7 +82,7 @@ func main() {
 
     countries, err := redis.Strings(reply[0], nil)
     if err != nil {
-	log.Fatalf("redis.Stgrings error: %s", err.Error())
+	log.Fatalf("redis.Strings error: %s", err.Error())
     }
 
     for i := range countries {
