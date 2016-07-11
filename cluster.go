@@ -338,7 +338,7 @@ func (cluster *Cluster) update(node *redisNode) error {
 	}
 
 	t, err := Values(m[2], err)
-	if err != nil || len(t) != 2 {
+	if err != nil || len(t) < 2 {
 	    return errFormat
 	}
 
