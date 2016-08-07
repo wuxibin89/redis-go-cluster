@@ -91,7 +91,7 @@ func (batch *Batch) Put(cmd string, args ...interface{}) error {
 // directed to the same node, they will be merged and sent at once using pipeling.
 func (cluster *Cluster) RunBatch(bat *Batch) ([]interface{}, error) {
     for i := range bat.batches {
-	go doBatch(bat.batches[i])
+	go doBatch(&bat.batches[i])
     }
 
     for i := range bat.batches {
@@ -111,7 +111,7 @@ func (cluster *Cluster) RunBatch(bat *Batch) ([]interface{}, error) {
     return replies, nil
 }
 
-func doBatch(batch nodeBatch) {
+func doBatch(batch *nodeBatch) {
     conn, err := batch.node.getConn()
     if err != nil {
 	batch.err = err
