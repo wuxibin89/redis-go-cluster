@@ -15,6 +15,7 @@
 package redis
 
 import (
+    "errors"
     "log"
     "fmt"
     "time"
@@ -247,7 +248,7 @@ func (cluster *Cluster) handleConnTimeout(node *redisNode, cmd string, args []in
     // ignore replies other than MOVED
     errMsg := reply.(redisError).Error()
     if len(errMsg) < 5 || string(errMsg[:5]) != "MOVED" {
-	return reply, nil
+	return nil, errors.New(errMsg)
     }
 
     // When MOVED received, we check wether move adress equal to 
