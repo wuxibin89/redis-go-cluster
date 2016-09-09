@@ -128,10 +128,6 @@ func (node *redisNode) releaseConn(conn *redisConn) {
 	return
     }
 
-    if conn.c.RemoteAddr().String() != node.address {
-	panic("unreachable")
-    }
-
     conn.t = time.Now()
     node.conns.PushFront(conn)
 }
