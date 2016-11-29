@@ -354,7 +354,7 @@ func (cluster *Cluster) update(node *redisNode) error {
 
 	slot, ok := slots[addr]
 	if !ok {
-	    slot = make([]uint16, 2)
+	    slot = make([]uint16, 0, 2)
 	}
 
 	nslots += end - start + 1
