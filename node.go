@@ -87,7 +87,7 @@ func (node *redisNode) getConn() (*redisConn, error) {
 	}
     }
 
-    if node.conns.Len() <= 0 {
+    if node.conns.Len() < node.keepAlive {
 	node.mutex.Unlock()
 
 	c, err := net.DialTimeout("tcp", node.address, node.connTimeout)
