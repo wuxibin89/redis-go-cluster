@@ -1,4 +1,5 @@
 # redis-go-cluster
+123456789
 redis-go-cluster is a golang implementation of redis client based on Gary Burd's
 [Redigo](https://github.com/garyburd/redigo). It caches slot info at local and 
 updates it automatically when cluster change. The client manages a connection pool 
