@@ -182,7 +182,7 @@ func (conn *redisConn) flush() error {
 
 func (conn *redisConn) receive() (interface{}, error) {
     if conn.readTimeout > 0 {
-	conn.c.SetWriteDeadline(time.Now().Add(conn.readTimeout))
+	conn.c.SetReadDeadline(time.Now().Add(conn.readTimeout))
     }
 
     if conn.pending <= 0 {
