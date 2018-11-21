@@ -17,6 +17,7 @@ package redis
 
 import (
     "fmt"
+    "io"
     "net"
     "sync"
     "time"
@@ -414,19 +415,20 @@ func (conn *redisConn) readReply() (interface{}, error) {
 	return parseInt(line[1:])
     case '$':
 	n, err := parseLen(line[1:])
-	if n < 0 || err != nil {
-	    return nil, err
-	}
-
-	line, err = conn.readLine()
-	if err != nil {
-	    return nil, err
-	}
-	if len(line) != n {
-	    return nil, errors.New("invalid response")
-	}
-
-	return line, nil
+    if n < 0 || err != nil {
+        return nil, err
+    }
+    p := make([]byte, n)
+    _, err = io.ReadFull(conn.br, p)
+    if err != nil {
+        return nil, err
+    }
+    if line, err := conn.readLine(); err != nil {
+        return nil, err
+    } else if len(line) != 0 {
+        return nil,  errors.New("invalid response")
+    }
+    return p, nil
     case '*':
 	n, err := parseLen(line[1:])
 	if n < 0 || err != nil {
