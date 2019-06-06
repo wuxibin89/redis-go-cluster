@@ -523,6 +523,19 @@ func hash(key string) uint16 {
     return crc16(key[s+1:e]) & (kClusterSlots-1)
 }
 
+func (cluster *Cluster) Ping() (interface{}, error) {
+	responsePing := make(map[string]interface{})
+	for addr, node := range cluster.nodes {
+		reply, err := node.do("ping")
+		if err != nil {
+			return nil, err
+		} else {
+			responsePing[addr] = reply
+		}
+	}
+	return responsePing, nil
+}
+
 func init() {
     log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
