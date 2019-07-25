@@ -20,6 +20,7 @@ func Example1() {
 			WriteTimeout: 50 * time.Millisecond,
 			KeepAlive:    16,
 			AliveTime:    60 * time.Second,
+			Password:     "yourpassword",
 		})
 
 	if err != nil {

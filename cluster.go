@@ -34,6 +34,9 @@ type Options struct {
 
 	KeepAlive int           // Maximum keep alive connecion in each node
 	AliveTime time.Duration // Keep alive timeout
+
+	// Password is redis nodes password. Optional.
+	Password string
 }
 
 // Cluster is a redis client that manage connections to redis nodes,
@@ -49,6 +52,8 @@ type Cluster struct {
 
 	keepAlive int
 	aliveTime time.Duration
+
+	password string
 
 	updateTime time.Time
 	updateList chan updateMesg
@@ -72,6 +77,7 @@ func NewCluster(options *Options) (*Cluster, error) {
 		writeTimeout: options.WriteTimeout,
 		keepAlive:    options.KeepAlive,
 		aliveTime:    options.AliveTime,
+		password:     options.Password,
 		updateList:   make(chan updateMesg),
 	}
 
@@ -83,6 +89,7 @@ func NewCluster(options *Options) (*Cluster, error) {
 			writeTimeout: options.WriteTimeout,
 			keepAlive:    options.KeepAlive,
 			aliveTime:    options.AliveTime,
+			password:     options.Password,
 		}
 
 		err := cluster.update(node)
@@ -386,6 +393,7 @@ func (cluster *Cluster) update(node *redisNode) error {
 				writeTimeout: cluster.writeTimeout,
 				keepAlive:    cluster.keepAlive,
 				aliveTime:    cluster.aliveTime,
+				password:     cluster.password,
 			}
 		}
 

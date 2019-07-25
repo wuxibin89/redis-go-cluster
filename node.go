@@ -57,6 +57,8 @@ type redisNode struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 
+	password string
+
 	mutex sync.Mutex
 
 	updateTime time.Time
@@ -101,6 +103,13 @@ func (node *redisNode) getConn() (*redisConn, error) {
 			bw:           bufio.NewWriter(c),
 			readTimeout:  node.readTimeout,
 			writeTimeout: node.writeTimeout,
+		}
+
+		if node.password != "" {
+			if _, err := conn.do("AUTH", node.password); err != nil {
+				conn.shutdown()
+				return nil, err
+			}
 		}
 
 		return conn, nil
@@ -194,18 +203,13 @@ func (conn *redisConn) receive() (interface{}, error) {
 	return conn.readReply()
 }
 
-func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) {
-	conn, err := node.getConn()
-	if err != nil {
-		return redisError("ECONNTIMEOUT"), nil
-	}
-
-	if err = conn.send(cmd, args...); err != nil {
+func (conn *redisConn) do(cmd string, args ...interface{}) (interface{}, error) {
+	if err := conn.send(cmd, args...); err != nil {
 		conn.shutdown()
 		return nil, err
 	}
 
-	if err = conn.flush(); err != nil {
+	if err := conn.flush(); err != nil {
 		conn.shutdown()
 		return nil, err
 	}
@@ -215,6 +219,17 @@ func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) 
 		conn.shutdown()
 		return nil, err
 	}
+
+	return reply, err
+}
+
+func (node *redisNode) do(cmd string, args ...interface{}) (interface{}, error) {
+	conn, err := node.getConn()
+	if err != nil {
+		return redisError("ECONNTIMEOUT"), nil
+	}
+
+	reply, err := conn.do(cmd, args...)
 
 	node.releaseConn(conn)
 
