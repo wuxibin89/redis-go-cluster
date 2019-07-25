@@ -8,7 +8,7 @@ import (
 	"github.com/chasex/redis-go-cluster"
 )
 
-func main() {
+func Example4() {
 	cluster, err := redis.NewCluster(
 		&redis.Options{
 			StartNodes:   []string{"127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"},

@@ -214,7 +214,7 @@ func TestRedisPipeline(t *testing.T) {
 	conn.receive()
 	value, err := Int(conn.receive())
 	if value != 141 {
-		t.Errorf("unexpected error: %d\n", reply)
+		t.Errorf("unexpected error: %v\n", reply)
 	}
 }
 

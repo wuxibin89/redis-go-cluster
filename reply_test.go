@@ -119,7 +119,7 @@ func TestRedisString(t *testing.T) {
 		t.Errorf("SET error: %s\n", err.Error())
 	}
 	if value != "hello world" {
-		t.Errorf("unexpected value: %f\n", value)
+		t.Errorf("unexpected value: %v\n", value)
 	}
 }
 
@@ -136,7 +136,7 @@ func TestRedisBytes(t *testing.T) {
 		t.Errorf("SET error: %s\n", err.Error())
 	}
 	if string(value) != "hello world" {
-		t.Errorf("unexpected value: %f\n", value)
+		t.Errorf("unexpected value: %v\n", value)
 	}
 }
 

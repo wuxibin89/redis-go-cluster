@@ -11,7 +11,7 @@ import (
 
 const kNumOfRoutine = 50
 
-func main() {
+func Example1() {
 	cluster, err := redis.NewCluster(
 		&redis.Options{
 			StartNodes:   []string{"10.168.66.193:7001", "10.168.66.193:7000", "10.168.66.187:7002"},
