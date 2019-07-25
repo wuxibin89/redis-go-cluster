@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/chasex/redis-go-cluster"
+	"github.com/pihao/redis-go-cluster"
 )
 
 func Example3() {

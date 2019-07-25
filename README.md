@@ -17,19 +17,19 @@ to its high efficiency and low lantency.
 * Lua script
 
 ## Documentation
-[API Reference](https://godoc.org/github.com/chasex/redis-go-cluster)
+[API Reference](https://godoc.org/github.com/pihao/redis-go-cluster)
 
 ## Installation
 Install redis-go-cluster with go tool:
 ```
-    go get github.com/chasex/redis-go-cluster
+    go get github.com/pihao/redis-go-cluster
 ```
 
 ## Usage
 To use redis cluster, you need import the package and create a new cluster client
 with an options:
 ```go
-import "github.com/chasex/redis-go-cluster"
+import "github.com/pihao/redis-go-cluster"
 
 cluster, err := redis.NewCluster(
     &redis.Options{

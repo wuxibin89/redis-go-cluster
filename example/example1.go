@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/chasex/redis-go-cluster"
+	"github.com/pihao/redis-go-cluster"
 )
 
 const kNumOfRoutine = 50
