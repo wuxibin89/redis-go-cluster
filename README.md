@@ -1,8 +1,8 @@
 # redis-go-cluster
 redis-go-cluster is a golang implementation of redis client based on Gary Burd's
-[Redigo](https://github.com/garyburd/redigo). It caches slot info at local and 
-updates it automatically when cluster change. The client manages a connection pool 
-for each node, uses goroutine to execute as concurrently as possible, which leads 
+[Redigo](https://github.com/garyburd/redigo). It caches slot info at local and
+updates it automatically when cluster change. The client manages a connection pool
+for each node, uses goroutine to execute as concurrently as possible, which leads
 to its high efficiency and low lantency.
 
 **Supported**:
@@ -17,19 +17,19 @@ to its high efficiency and low lantency.
 * Lua script
 
 ## Documentation
-[API Reference](https://godoc.org/github.com/chasex/redis-go-cluster)
+[API Reference](https://godoc.org/github.com/pihao/redis-go-cluster)
 
 ## Installation
 Install redis-go-cluster with go tool:
 ```
-    go get github.com/chasex/redis-go-cluster
+    go get github.com/pihao/redis-go-cluster
 ```
-    
+
 ## Usage
 To use redis cluster, you need import the package and create a new cluster client
 with an options:
 ```go
-import "github.com/chasex/redis-go-cluster"
+import "github.com/pihao/redis-go-cluster"
 
 cluster, err := redis.NewCluster(
     &redis.Options{
@@ -39,15 +39,16 @@ cluster, err := redis.NewCluster(
 	WriteTimeout: 50 * time.Millisecond,
 	KeepAlive: 16,
 	AliveTime: 60 * time.Second,
+	Passowrd: "yourpassword",
     })
 ```
 
 ### Basic
-redis-go-cluster has compatible interface to [Redigo](https://github.com/garyburd/redigo), 
-which uses a print-like API for all redis commands. When executing a command, it need a key 
+redis-go-cluster has compatible interface to [Redigo](https://github.com/garyburd/redigo),
+which uses a print-like API for all redis commands. When executing a command, it need a key
 to hash to a slot, then find the corresponding redis node. Do method will choose first
 argument in args as the key, so commands which are independent from keys are not supported,
-such as SYNC, BGSAVE, RANDOMKEY, etc. 
+such as SYNC, BGSAVE, RANDOMKEY, etc.
 
 **RESTRICTION**: Please be sure the first argument in args is key.
 
@@ -87,14 +88,14 @@ Processing steps are as follows:
 - Then, start a goroutine for each node to excute MGET/MSET commands and wait them finish.
 - Last, collect and rerange all replies, return back to caller.
 
-**NOTE**: Since the keys may spread across mutiple node, there's no atomicity gurantee that 
+**NOTE**: Since the keys may spread across mutiple node, there's no atomicity gurantee that
 all keys will be set at once. It's possible that some keys are set while others are not.
 
 ### Pipelining
-Pipelining is supported through the Batch interface. You can put multiple commands into a 
+Pipelining is supported through the Batch interface. You can put multiple commands into a
 batch as long as it is supported by Do method. RunBatch will split these command to distinct
-nodes and start a goroutine for each node. Commands hash to same nodes will be merged and sent 
-using pipelining. After all commands done, it rearrange results as MGET/MSET do. Result is a 
+nodes and start a goroutine for each node. Commands hash to same nodes will be merged and sent
+using pipelining. After all commands done, it rearrange results as MGET/MSET do. Result is a
 slice of each command's reply, you can use Scan to convert them to other types.
 ```go
 batch := cluster.NewBatch()
@@ -107,7 +108,7 @@ reply, err = cluster.RunBatch(batch)
 
 var resp int
 for i := 0; i < 4; i++ {
-    reply, err = redis.Scan(reply, &resp)    
+    reply, err = redis.Scan(reply, &resp)
 }
 
 countries, err := Strings(reply[0], nil)
